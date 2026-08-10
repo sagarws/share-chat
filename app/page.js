@@ -3,14 +3,27 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+const formatSize = (bytes) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 export default function Home() {
   const [username, setUsername] = useState('');
   const [joined, setJoined] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
+  const [file, setFile] = useState(null);
+  const [error, setError] = useState('');
+  const [sending, setSending] = useState(false);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef(null);
   const listRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const urlsRef = useRef([]);
 
   useEffect(() => {
     if (!joined) return;
@@ -32,11 +45,25 @@ export default function Home() {
       setMessages((prev) => [...prev, { ...msg, kind: 'system' }])
     );
 
+    socket.on('file', (msg) => {
+      const blob = new Blob([msg.data], { type: msg.mime });
+      const url = URL.createObjectURL(blob);
+      urlsRef.current.push(url);
+      setMessages((prev) => [...prev, { ...msg, kind: 'file', url }]);
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
     };
   }, [joined, username]);
+
+  useEffect(() => {
+    return () => {
+      urlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      urlsRef.current = [];
+    };
+  }, []);
 
   useEffect(() => {
     if (listRef.current) {
@@ -50,10 +77,55 @@ export default function Home() {
     setJoined(true);
   };
 
-  const handleSend = (e) => {
+  const handlePickFile = (e) => {
+    const picked = e.target.files?.[0];
+    e.target.value = '';
+    if (!picked) return;
+    if (picked.size > MAX_FILE_BYTES) {
+      setError(`File is too large (max ${formatSize(MAX_FILE_BYTES)}).`);
+      return;
+    }
+    setError('');
+    setFile(picked);
+  };
+
+  const handleSend = async (e) => {
     e.preventDefault();
+    if (!socketRef.current || sending) return;
+
     const text = input.trim();
-    if (!text || !socketRef.current) return;
+
+    if (file) {
+      setSending(true);
+      try {
+        const data = await file.arrayBuffer();
+        const res = await socketRef.current.timeout(30000).emitWithAck('file', {
+          name: file.name,
+          mime: file.type || 'application/octet-stream',
+          size: file.size,
+          data,
+          text,
+        });
+
+        if (!res?.ok) {
+          setError(res?.error || 'Server rejected the file.');
+          return;
+        }
+
+        setFile(null);
+        setInput('');
+        setError('');
+      } catch {
+        setError(
+          'Upload failed — the server never confirmed it. If you just changed server.js, restart the dev server.'
+        );
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    if (!text) return;
     socketRef.current.emit('message', { text });
     setInput('');
   };
@@ -109,22 +181,82 @@ export default function Home() {
               className={`bubble ${m.user === username ? 'mine' : 'theirs'}`}
             >
               {m.user !== username && <div className="who">{m.user}</div>}
-              <div className="text">{m.text}</div>
+
+              {m.kind === 'file' &&
+                (m.mime.startsWith('image/') ? (
+                  <a href={m.url} download={m.name} className="attachment-image">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={m.url} alt={m.name} />
+                  </a>
+                ) : (
+                  <a href={m.url} download={m.name} className="attachment-file">
+                    <span className="attachment-icon">📄</span>
+                    <span className="attachment-meta">
+                      <span className="attachment-name">{m.name}</span>
+                      <span className="attachment-size">
+                        {formatSize(m.size)} · download
+                      </span>
+                    </span>
+                  </a>
+                ))}
+
+              {m.text && <div className="text">{m.text}</div>}
               <div className="time">{formatTime(m.ts)}</div>
             </div>
           )
         )}
       </main>
 
+      {error && <div className="composer-error">{error}</div>}
+
+      {file && (
+        <div className="pending-file">
+          <span className="attachment-icon">
+            {file.type.startsWith('image/') ? '🖼️' : '📄'}
+          </span>
+          <span className="attachment-meta">
+            <span className="attachment-name">{file.name}</span>
+            <span className="attachment-size">{formatSize(file.size)}</span>
+          </span>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setFile(null)}
+            aria-label="Remove attachment"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       <form className="composer" onSubmit={handleSend}>
         <input
-          placeholder="Type a message"
+          ref={fileInputRef}
+          type="file"
+          hidden
+          onChange={handlePickFile}
+        />
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!connected || sending}
+          aria-label="Attach file"
+          title="Attach file"
+        >
+          📎
+        </button>
+        <input
+          placeholder={file ? 'Add a caption (optional)' : 'Type a message'}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           maxLength={1000}
         />
-        <button type="submit" disabled={!input.trim() || !connected}>
-          Send
+        <button
+          type="submit"
+          disabled={(!input.trim() && !file) || !connected || sending}
+        >
+          {sending ? 'Sending…' : 'Send'}
         </button>
       </form>
     </div>
