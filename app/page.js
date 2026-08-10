@@ -2,10 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import Composer from './Composer';
+import { renderMarkdown } from './markdown';
 
 // Keep in sync with the same-named constants in server.js.
 const MAX_FILE_BYTES = 10000 * 1024 * 1024;
 const CHUNK_BYTES = 256 * 1024;
+const MAX_TEXT_LENGTH = 4000;
 
 const formatSize = (bytes) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -138,7 +141,6 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
   const socketRef = useRef(null);
   const listRef = useRef(null);
-  const fileInputRef = useRef(null);
   const urlsRef = useRef([]);
   const incomingRef = useRef(new Map());
 
@@ -248,7 +250,7 @@ export default function Home() {
   };
 
   const handleSend = async (e) => {
-    e.preventDefault();
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
     if (!socketRef.current || sending) return;
 
     const text = input.trim();
@@ -402,7 +404,9 @@ export default function Home() {
 
               {m.kind === 'file' && <Attachment message={m} />}
 
-              {m.text && <div className="text">{m.text}</div>}
+              {m.text && (
+                <div className="text md">{renderMarkdown(m.text)}</div>
+              )}
               <div className="time">{formatTime(m.ts)}</div>
             </div>
           )
@@ -431,36 +435,17 @@ export default function Home() {
         </div>
       )}
 
-      <form className="composer" onSubmit={handleSend}>
-        <input
-          ref={fileInputRef}
-          type="file"
-          hidden
-          onChange={handlePickFile}
-        />
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!connected || sending}
-          aria-label="Attach file"
-          title="Attach file"
-        >
-          📎
-        </button>
-        <input
-          placeholder={file ? 'Add a caption (optional)' : 'Type a message'}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          maxLength={1000}
-        />
-        <button
-          type="submit"
-          disabled={(!input.trim() && !file) || !connected || sending}
-        >
-          {sending ? 'Sending…' : 'Send'}
-        </button>
-      </form>
+      <Composer
+        value={input}
+        onChange={setInput}
+        onSubmit={handleSend}
+        onPickFile={handlePickFile}
+        disabled={!connected}
+        sending={sending}
+        hasAttachment={Boolean(file)}
+        placeholder={file ? 'Add a caption (optional)' : 'Type a message'}
+        maxLength={MAX_TEXT_LENGTH}
+      />
     </div>
   );
 }

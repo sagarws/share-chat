@@ -36,7 +36,7 @@ app.prepare().then(() => {
 
     socket.on('message', (payload) => {
       if (!payload || typeof payload.text !== 'string') return;
-      const text = payload.text.trim().slice(0, 1000);
+      const text = payload.text.trim().slice(0, 4000);
       if (!text) return;
 
       io.emit('message', {
@@ -78,7 +78,7 @@ app.prepare().then(() => {
         size,
         received: 0,
         text:
-          typeof meta.text === 'string' ? meta.text.trim().slice(0, 1000) : '',
+          typeof meta.text === 'string' ? meta.text.trim().slice(0, 4000) : '',
       };
       transfers.set(id, info);
 
