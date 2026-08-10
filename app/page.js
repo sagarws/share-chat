@@ -6,7 +6,31 @@ import Composer from './Composer';
 import { renderMarkdown } from './markdown';
 import db from './database/db.json';
 
-const AUTH_KEY = 'chat-authed';
+const AUTH_KEY = 'chat-auth';
+const SESSION_MS = 30 * 60 * 1000; // 30 minutes
+
+const readAuth = () => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const clearAuth = () => {
+  if (typeof window !== 'undefined') window.localStorage.removeItem(AUTH_KEY);
+};
+
+// True only if the stored password still matches and the session hasn't expired.
+const isAuthValid = () => {
+  const rec = readAuth();
+  if (!rec || typeof rec !== 'object') return false;
+  if (rec.pwd !== db.pwd) return false;
+  if (typeof rec.ts !== 'number') return false;
+  return Date.now() - rec.ts <= SESSION_MS;
+};
 
 // Keep in sync with the same-named constants in server.js.
 const MAX_FILE_BYTES = 10000 * 1024 * 1024;
@@ -237,19 +261,62 @@ export default function Home() {
     }
   }, [messages]);
 
-  // Rehydrate a prior password unlock so a refresh doesn't ask again.
+  // Drop everything the chat session owns and send the user back to the login
+  // screen. Called on manual logout AND on session expiry.
+  const logout = () => {
+    clearAuth();
+    setAuthed(false);
+    setJoined(false);
+    setUsername('');
+    setMessages([]);
+    setInput('');
+    setFile(null);
+    setError('');
+    setPwdInput('');
+    setPwdError('');
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+  };
+
+  // Rehydrate a prior password unlock so a refresh doesn't ask again — but
+  // only if the stored password still matches and the 30-min window is alive.
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (window.sessionStorage.getItem(AUTH_KEY) === '1') setAuthed(true);
+    if (isAuthValid()) setAuthed(true);
+    else clearAuth();
   }, []);
+
+  // While authed, re-check the stored pwd + timestamp on an interval and
+  // whenever the tab regains focus. If either fails, purge and log out.
+  useEffect(() => {
+    if (!authed) return;
+    const tick = () => {
+      if (!isAuthValid()) logout();
+    };
+    const int = setInterval(tick, 30_000);
+    const onVis = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearInterval(int);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+    // logout intentionally omitted — it only touches setState + refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
 
   const handleLogin = (e) => {
     e.preventDefault();
     if (pwdInput === db.pwd) {
+      window.localStorage.setItem(
+        AUTH_KEY,
+        JSON.stringify({ pwd: pwdInput, ts: Date.now() })
+      );
       setAuthed(true);
       setPwdError('');
       setPwdInput('');
-      window.sessionStorage.setItem(AUTH_KEY, '1');
     } else {
       setPwdError('Incorrect password.');
     }
@@ -276,6 +343,10 @@ export default function Home() {
   const handleSend = async (e) => {
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
     if (!socketRef.current || sending) return;
+    if (!isAuthValid()) {
+      logout();
+      return;
+    }
 
     const text = input.trim();
 
