@@ -6,6 +6,8 @@ const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
 const port = parseInt(process.env.PORT, 10) || 3000;
 const MAX_FILE_BYTES = 10000 * 1024 * 1024;
+const MAX_CHUNK_BYTES = 512 * 1024;
+const MAX_CONCURRENT_TRANSFERS = 4;
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
@@ -16,7 +18,8 @@ app.prepare().then(() => {
   const io = new Server(httpServer, {
     cors: { origin: '*' },
     path: '/socket.io',
-    maxHttpBufferSize: MAX_FILE_BYTES + 1024 * 1024,
+    // Files stream in chunks now, so a frame only ever needs to hold one chunk.
+    maxHttpBufferSize: MAX_CHUNK_BYTES * 2,
   });
 
   io.on('connection', (socket) => {
@@ -44,14 +47,61 @@ app.prepare().then(() => {
       });
     });
 
-    socket.on('file', (payload, ack) => {
+    // In-flight chunked transfers started by this socket, keyed by transfer id.
+    const transfers = new Map();
+    let transferSeq = 0;
+
+    socket.on('file-start', (meta, ack) => {
       const fail = (error) => {
         if (typeof ack === 'function') ack({ ok: false, error });
       };
 
-      if (!payload || typeof payload.name !== 'string') {
-        return fail('Invalid file payload.');
+      if (!meta || typeof meta.name !== 'string') {
+        return fail('Invalid file metadata.');
       }
+
+      const size = Number(meta.size);
+      if (!Number.isFinite(size) || size <= 0) return fail('File is empty.');
+      if (size > MAX_FILE_BYTES) return fail('File is too large.');
+      if (transfers.size >= MAX_CONCURRENT_TRANSFERS) {
+        return fail('Too many uploads at once.');
+      }
+
+      const id = `${socket.id}-${Date.now()}-${transferSeq++}`;
+      const info = {
+        id,
+        name: meta.name.trim().slice(0, 120) || 'file',
+        mime:
+          typeof meta.mime === 'string' && meta.mime
+            ? meta.mime.slice(0, 100)
+            : 'application/octet-stream',
+        size,
+        received: 0,
+        text:
+          typeof meta.text === 'string' ? meta.text.trim().slice(0, 1000) : '',
+      };
+      transfers.set(id, info);
+
+      socket.broadcast.emit('file-start', {
+        id,
+        user: username,
+        name: info.name,
+        mime: info.mime,
+        size: info.size,
+        text: info.text,
+        ts: Date.now(),
+      });
+
+      if (typeof ack === 'function') ack({ ok: true, id });
+    });
+
+    socket.on('file-chunk', (payload, ack) => {
+      const fail = (error) => {
+        if (typeof ack === 'function') ack({ ok: false, error });
+      };
+
+      const info = payload && transfers.get(payload.id);
+      if (!info) return fail('Unknown transfer.');
 
       const raw = payload.data;
       const buf = Buffer.isBuffer(raw)
@@ -59,32 +109,54 @@ app.prepare().then(() => {
         : raw instanceof ArrayBuffer
           ? Buffer.from(raw)
           : null;
-      if (!buf || buf.length === 0) return fail('File is empty or unreadable.');
-      if (buf.length > MAX_FILE_BYTES) return fail('File is too large.');
+      if (!buf || buf.length === 0) return fail('Empty chunk.');
+      if (buf.length > MAX_CHUNK_BYTES) {
+        transfers.delete(info.id);
+        socket.broadcast.emit('file-abort', { id: info.id });
+        return fail('Chunk too large.');
+      }
 
-      const name = payload.name.trim().slice(0, 120) || 'file';
-      const mime =
-        typeof payload.mime === 'string' && payload.mime
-          ? payload.mime.slice(0, 100)
-          : 'application/octet-stream';
-      const text =
-        typeof payload.text === 'string' ? payload.text.trim().slice(0, 1000) : '';
+      info.received += buf.length;
+      if (info.received > info.size) {
+        transfers.delete(info.id);
+        socket.broadcast.emit('file-abort', { id: info.id });
+        return fail('File exceeded its declared size.');
+      }
 
-      io.emit('file', {
-        id: `${socket.id}-${Date.now()}`,
-        user: username,
-        name,
-        mime,
-        size: buf.length,
+      socket.broadcast.emit('file-chunk', {
+        id: info.id,
+        index: Number(payload.index) || 0,
         data: buf,
-        text,
-        ts: Date.now(),
       });
 
       if (typeof ack === 'function') ack({ ok: true });
     });
 
+    socket.on('file-end', (payload, ack) => {
+      const fail = (error) => {
+        if (typeof ack === 'function') ack({ ok: false, error });
+      };
+
+      const info = payload && transfers.get(payload.id);
+      if (!info) return fail('Unknown transfer.');
+      transfers.delete(info.id);
+
+      if (info.received !== info.size) {
+        socket.broadcast.emit('file-abort', { id: info.id });
+        return fail('Transfer was incomplete.');
+      }
+
+      socket.broadcast.emit('file-end', { id: info.id });
+      if (typeof ack === 'function') ack({ ok: true });
+    });
+
     socket.on('disconnect', () => {
+      // Tell receivers to drop any half-streamed files from this sender.
+      for (const id of transfers.keys()) {
+        socket.broadcast.emit('file-abort', { id });
+      }
+      transfers.clear();
+
       socket.broadcast.emit('system', {
         id: `sys-${Date.now()}-${socket.id}`,
         text: `${username} left`,

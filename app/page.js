@@ -3,13 +3,129 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+// Keep in sync with the same-named constants in server.js.
+const MAX_FILE_BYTES = 10000 * 1024 * 1024;
+const CHUNK_BYTES = 256 * 1024;
 
 const formatSize = (bytes) => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 };
+
+// WhatsApp-style circular progress ring shown while a file moves.
+function ProgressRing({ value, size = 44 }) {
+  const stroke = 3;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const pct = Math.max(0, Math.min(1, value));
+
+  return (
+    <svg className="ring" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="rgba(255,255,255,0.25)"
+        strokeWidth={stroke}
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="#fff"
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - pct)}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </svg>
+  );
+}
+
+function Attachment({ message: m }) {
+  const busy = m.status === 'uploading' || m.status === 'downloading';
+  const failed = m.status === 'failed';
+  const percent = Math.round((m.progress || 0) * 100);
+  const isImage = m.mime.startsWith('image/');
+
+  const statusLine = failed
+    ? 'Failed'
+    : m.status === 'uploading'
+      ? `Uploading · ${percent}%`
+      : m.status === 'downloading'
+        ? `Downloading · ${percent}%`
+        : `${formatSize(m.size)} · download`;
+
+  if (isImage) {
+    // Receivers have no bytes until the transfer finishes, so show a placeholder.
+    const body = m.url ? (
+      /* eslint-disable-next-line @next/next/no-img-element */
+      <img src={m.url} alt={m.name} className={busy ? 'dimmed' : undefined} />
+    ) : (
+      <div className="image-placeholder" />
+    );
+
+    const media = (
+      <div className="attachment-image">
+        {body}
+        {busy && (
+          <span className="ring-overlay">
+            <ProgressRing value={m.progress || 0} size={52} />
+            <span className="ring-label">{percent}%</span>
+          </span>
+        )}
+        {failed && <span className="ring-overlay failed-badge">!</span>}
+      </div>
+    );
+
+    return (
+      <>
+        {m.url && !busy ? (
+          <a href={m.url} download={m.name} className="attachment-link">
+            {media}
+          </a>
+        ) : (
+          media
+        )}
+        {busy && <div className="attachment-size">{statusLine}</div>}
+      </>
+    );
+  }
+
+  const card = (
+    <div className={`attachment-file ${failed ? 'failed' : ''}`}>
+      <span className="attachment-icon">
+        {busy ? (
+          <span className="ring-wrap">
+            <ProgressRing value={m.progress || 0} size={34} />
+            <span className="ring-label small">{percent}</span>
+          </span>
+        ) : failed ? (
+          '⚠️'
+        ) : (
+          '📄'
+        )}
+      </span>
+      <span className="attachment-meta">
+        <span className="attachment-name">{m.name}</span>
+        <span className="attachment-size">{statusLine}</span>
+      </span>
+    </div>
+  );
+
+  return m.url && !busy ? (
+    <a href={m.url} download={m.name} className="attachment-link">
+      {card}
+    </a>
+  ) : (
+    card
+  );
+}
 
 export default function Home() {
   const [username, setUsername] = useState('');
@@ -24,6 +140,7 @@ export default function Home() {
   const listRef = useRef(null);
   const fileInputRef = useRef(null);
   const urlsRef = useRef([]);
+  const incomingRef = useRef(new Map());
 
   useEffect(() => {
     if (!joined) return;
@@ -45,11 +162,52 @@ export default function Home() {
       setMessages((prev) => [...prev, { ...msg, kind: 'system' }])
     );
 
-    socket.on('file', (msg) => {
-      const blob = new Blob([msg.data], { type: msg.mime });
-      const url = URL.createObjectURL(blob);
-      urlsRef.current.push(url);
-      setMessages((prev) => [...prev, { ...msg, kind: 'file', url }]);
+    socket.on('file-start', (msg) => {
+      incomingRef.current.set(msg.id, { parts: [], received: 0 });
+      setMessages((prev) => [
+        ...prev,
+        { ...msg, kind: 'file', status: 'downloading', progress: 0 },
+      ]);
+    });
+
+    socket.on('file-chunk', ({ id, data }) => {
+      const entry = incomingRef.current.get(id);
+      if (!entry) return;
+
+      entry.parts.push(data);
+      entry.received += data.byteLength ?? data.length ?? 0;
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === id
+            ? { ...m, progress: m.size ? entry.received / m.size : 0 }
+            : m
+        )
+      );
+    });
+
+    socket.on('file-end', ({ id }) => {
+      const entry = incomingRef.current.get(id);
+      if (!entry) return;
+      incomingRef.current.delete(id);
+
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== id) return m;
+          const url = URL.createObjectURL(
+            new Blob(entry.parts, { type: m.mime })
+          );
+          urlsRef.current.push(url);
+          return { ...m, url, status: 'done', progress: 1 };
+        })
+      );
+    });
+
+    socket.on('file-abort', ({ id }) => {
+      incomingRef.current.delete(id);
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, status: 'failed' } : m))
+      );
     });
 
     return () => {
@@ -96,14 +254,19 @@ export default function Home() {
     const text = input.trim();
 
     if (file) {
+      const socket = socketRef.current;
+      const outgoing = file;
+      const mime = outgoing.type || 'application/octet-stream';
+
       setSending(true);
+      setError('');
+
+      let localId = null;
       try {
-        const data = await file.arrayBuffer();
-        const res = await socketRef.current.timeout(30000).emitWithAck('file', {
-          name: file.name,
-          mime: file.type || 'application/octet-stream',
-          size: file.size,
-          data,
+        const res = await socket.timeout(30000).emitWithAck('file-start', {
+          name: outgoing.name,
+          mime,
+          size: outgoing.size,
           text,
         });
 
@@ -112,13 +275,68 @@ export default function Home() {
           return;
         }
 
+        // Clear the composer now that the transfer is accepted.
+        localId = res.id;
         setFile(null);
         setInput('');
-        setError('');
-      } catch {
-        setError(
-          'Upload failed — the server never confirmed it. If you just changed server.js, restart the dev server.'
+
+        // The sender already has the bytes, so preview locally at 0%.
+        const url = URL.createObjectURL(outgoing);
+        urlsRef.current.push(url);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: localId,
+            kind: 'file',
+            user: username,
+            name: outgoing.name,
+            mime,
+            size: outgoing.size,
+            text,
+            ts: Date.now(),
+            url,
+            status: 'uploading',
+            progress: 0,
+          },
+        ]);
+
+        let sent = 0;
+        for (let index = 0; sent < outgoing.size; index++) {
+          const slice = outgoing.slice(sent, sent + CHUNK_BYTES);
+          const data = await slice.arrayBuffer();
+
+          const chunkRes = await socket
+            .timeout(30000)
+            .emitWithAck('file-chunk', { id: localId, index, data });
+          if (!chunkRes?.ok) throw new Error(chunkRes?.error || 'Chunk rejected.');
+
+          sent += data.byteLength;
+          const progress = sent / outgoing.size;
+          setMessages((prev) =>
+            prev.map((m) => (m.id === localId ? { ...m, progress } : m))
+          );
+        }
+
+        const endRes = await socket
+          .timeout(30000)
+          .emitWithAck('file-end', { id: localId });
+        if (!endRes?.ok) throw new Error(endRes?.error || 'Transfer failed.');
+
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === localId ? { ...m, status: 'done', progress: 1 } : m
+          )
         );
+      } catch (err) {
+        setError(
+          err?.message ||
+            'Upload failed — the server never confirmed it. If you just changed server.js, restart the dev server.'
+        );
+        if (localId) {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === localId ? { ...m, status: 'failed' } : m))
+          );
+        }
       } finally {
         setSending(false);
       }
@@ -182,23 +400,7 @@ export default function Home() {
             >
               {m.user !== username && <div className="who">{m.user}</div>}
 
-              {m.kind === 'file' &&
-                (m.mime.startsWith('image/') ? (
-                  <a href={m.url} download={m.name} className="attachment-image">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={m.url} alt={m.name} />
-                  </a>
-                ) : (
-                  <a href={m.url} download={m.name} className="attachment-file">
-                    <span className="attachment-icon">📄</span>
-                    <span className="attachment-meta">
-                      <span className="attachment-name">{m.name}</span>
-                      <span className="attachment-size">
-                        {formatSize(m.size)} · download
-                      </span>
-                    </span>
-                  </a>
-                ))}
+              {m.kind === 'file' && <Attachment message={m} />}
 
               {m.text && <div className="text">{m.text}</div>}
               <div className="time">{formatTime(m.ts)}</div>
