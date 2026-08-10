@@ -32,6 +32,87 @@ const isAuthValid = () => {
   return Date.now() - rec.ts <= SESSION_MS;
 };
 
+const EDIT_KEY = 'edit';
+
+// Fixed panel that appears in the top-left corner on every route (login,
+// join, chat). Only rendered when localStorage.edit === 'true'. Contains a
+// "change password" form that writes the new pwd to db.json via /api/password
+// and reloads so the client picks up the fresh bundled JSON.
+function MenuBar() {
+  const [enabled, setEnabled] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [newPwd, setNewPwd] = useState('');
+  const [status, setStatus] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setEnabled(window.localStorage.getItem(EDIT_KEY) === 'true');
+  }, []);
+
+  if (!enabled) return null;
+
+  const handleChange = async (e) => {
+    e.preventDefault();
+    const pwd = newPwd.trim();
+    if (!pwd || busy) return;
+    setBusy(true);
+    setStatus('Saving…');
+    try {
+      const res = await fetch('/api/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pwd }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Save failed.');
+      setStatus('Saved. Reloading…');
+      // The stored auth (old pwd) won't match the new db.pwd — purge it so
+      // the reload lands on the login screen with a clean slate.
+      window.localStorage.removeItem(AUTH_KEY);
+      setTimeout(() => window.location.reload(), 400);
+    } catch (err) {
+      setStatus(err?.message || 'Save failed.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <aside className="menu-bar" aria-label="Editor menu">
+      <button
+        type="button"
+        className="menu-toggle"
+        onClick={() => {
+          setOpen((v) => !v);
+          setStatus('');
+        }}
+        aria-expanded={open}
+      >
+        {open ? 'Close' : 'Menu'}
+      </button>
+      {open && (
+        <form className="menu-panel" onSubmit={handleChange}>
+          <label htmlFor="new-pwd">New password</label>
+          <input
+            id="new-pwd"
+            type="text"
+            autoComplete="off"
+            value={newPwd}
+            onChange={(e) => setNewPwd(e.target.value)}
+            maxLength={100}
+            autoFocus
+            disabled={busy}
+          />
+          <button type="submit" disabled={!newPwd.trim() || busy}>
+            Change password
+          </button>
+          {status && <span className="menu-status">{status}</span>}
+        </form>
+      )}
+    </aside>
+  );
+}
+
 // Keep in sync with the same-named constants in server.js.
 const MAX_FILE_BYTES = 10000 * 1024 * 1024;
 const CHUNK_BYTES = 256 * 1024;
@@ -450,54 +531,62 @@ export default function Home() {
 
   if (!authed) {
     return (
-      <div className="screen center">
-        <form className="join-card" onSubmit={handleLogin}>
-          <h1>Sign in</h1>
-          <p className="muted">Enter the password to continue.</p>
-          <input
-            autoFocus
-            type="password"
-            placeholder="Password"
-            value={pwdInput}
-            onChange={(e) => {
-              setPwdInput(e.target.value);
-              if (pwdError) setPwdError('');
-            }}
-            maxLength={100}
-          />
-          {pwdError && <div className="composer-error">{pwdError}</div>}
-          <button type="submit" disabled={!pwdInput}>
-            Unlock
-          </button>
-        </form>
-      </div>
+      <>
+        <MenuBar />
+        <div className="screen center">
+          <form className="join-card" onSubmit={handleLogin}>
+            <h1>Sign in</h1>
+            <p className="muted">Enter the password to continue.</p>
+            <input
+              autoFocus
+              type="password"
+              placeholder="Password"
+              value={pwdInput}
+              onChange={(e) => {
+                setPwdInput(e.target.value);
+                if (pwdError) setPwdError('');
+              }}
+              maxLength={100}
+            />
+            {pwdError && <div className="composer-error">{pwdError}</div>}
+            <button type="submit" disabled={!pwdInput}>
+              Unlock
+            </button>
+          </form>
+        </div>
+      </>
     );
   }
 
   if (!joined) {
     return (
-      <div className="screen center">
-        <form className="join-card" onSubmit={handleJoin}>
-          <h1>Join Chat</h1>
-          <p className="muted">Messages are kept in your browser only.</p>
-          <input
-            autoFocus
-            placeholder="Your name"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            maxLength={30}
-          />
-          <button type="submit" disabled={!username.trim()}>
-            Enter
-          </button>
-        </form>
-      </div>
+      <>
+        <MenuBar />
+        <div className="screen center">
+          <form className="join-card" onSubmit={handleJoin}>
+            <h1>Join Chat</h1>
+            <p className="muted">Messages are kept in your browser only.</p>
+            <input
+              autoFocus
+              placeholder="Your name"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              maxLength={30}
+            />
+            <button type="submit" disabled={!username.trim()}>
+              Enter
+            </button>
+          </form>
+        </div>
+      </>
     );
   }
 
   return (
-    <div className="screen">
-      <header className="header">
+    <>
+      <MenuBar />
+      <div className="screen">
+        <header className="header">
         <div>
           <strong>Chat</strong>
           <span className="muted"> · {username}</span>
@@ -556,17 +645,18 @@ export default function Home() {
         </div>
       )}
 
-      <Composer
-        value={input}
-        onChange={setInput}
-        onSubmit={handleSend}
-        onPickFile={handlePickFile}
-        disabled={!connected}
-        sending={sending}
-        hasAttachment={Boolean(file)}
-        placeholder={file ? 'Add a caption (optional)' : 'Type a message'}
-        maxLength={MAX_TEXT_LENGTH}
-      />
-    </div>
+        <Composer
+          value={input}
+          onChange={setInput}
+          onSubmit={handleSend}
+          onPickFile={handlePickFile}
+          disabled={!connected}
+          sending={sending}
+          hasAttachment={Boolean(file)}
+          placeholder={file ? 'Add a caption (optional)' : 'Type a message'}
+          maxLength={MAX_TEXT_LENGTH}
+        />
+      </div>
+    </>
   );
 }
