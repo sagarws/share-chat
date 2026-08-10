@@ -5,9 +5,9 @@ const { Server } = require('socket.io');
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
 const port = parseInt(process.env.PORT, 10) || 3000;
-const MAX_FILE_BYTES = 10000 * 1024 * 1024;
-const MAX_CHUNK_BYTES = 512 * 1024;
-const MAX_CONCURRENT_TRANSFERS = 4;
+const MAX_FILE_BYTES = 1000000 * 1024 * 1024;
+const MAX_CHUNK_BYTES = 51200000 * 1024;
+const MAX_CONCURRENT_TRANSFERS = 4000;
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
