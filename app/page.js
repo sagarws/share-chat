@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import Composer from './Composer';
 import { renderMarkdown } from './markdown';
+import db from './database/db.json';
+
+const AUTH_KEY = 'chat-authed';
 
 // Keep in sync with the same-named constants in server.js.
 const MAX_FILE_BYTES = 10000 * 1024 * 1024;
@@ -131,6 +134,9 @@ function Attachment({ message: m }) {
 }
 
 export default function Home() {
+  const [authed, setAuthed] = useState(false);
+  const [pwdInput, setPwdInput] = useState('');
+  const [pwdError, setPwdError] = useState('');
   const [username, setUsername] = useState('');
   const [joined, setJoined] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -230,6 +236,24 @@ export default function Home() {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Rehydrate a prior password unlock so a refresh doesn't ask again.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.sessionStorage.getItem(AUTH_KEY) === '1') setAuthed(true);
+  }, []);
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (pwdInput === db.pwd) {
+      setAuthed(true);
+      setPwdError('');
+      setPwdInput('');
+      window.sessionStorage.setItem(AUTH_KEY, '1');
+    } else {
+      setPwdError('Incorrect password.');
+    }
+  };
 
   const handleJoin = (e) => {
     e.preventDefault();
@@ -352,6 +376,32 @@ export default function Home() {
 
   const formatTime = (ts) =>
     new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  if (!authed) {
+    return (
+      <div className="screen center">
+        <form className="join-card" onSubmit={handleLogin}>
+          <h1>Sign in</h1>
+          <p className="muted">Enter the password to continue.</p>
+          <input
+            autoFocus
+            type="password"
+            placeholder="Password"
+            value={pwdInput}
+            onChange={(e) => {
+              setPwdInput(e.target.value);
+              if (pwdError) setPwdError('');
+            }}
+            maxLength={100}
+          />
+          {pwdError && <div className="composer-error">{pwdError}</div>}
+          <button type="submit" disabled={!pwdInput}>
+            Unlock
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   if (!joined) {
     return (

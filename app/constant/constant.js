@@ -1,0 +1,1 @@
+export const PASSWORD = "Sagar@123"
