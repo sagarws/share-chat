@@ -1,6 +1,7 @@
 const { createServer } = require('http');
 const next = require('next');
 const { Server } = require('socket.io');
+const { verifyToken } = require('./db');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
@@ -20,6 +21,19 @@ app.prepare().then(() => {
     path: '/socket.io',
     // Files stream in chunks now, so a frame only ever needs to hold one chunk.
     maxHttpBufferSize: MAX_CHUNK_BYTES * 2,
+  });
+
+  // Reject sockets whose handshake doesn't carry a valid, unexpired token.
+  // The token is minted by POST /api/login and stored in the client's
+  // localStorage. Without this, a hostile client could skip the password
+  // screen and connect directly.
+  io.use((socket, nextFn) => {
+    const token =
+      socket.handshake.auth?.token || socket.handshake.query?.token;
+    if (!verifyToken(token)) {
+      return nextFn(new Error('unauthorized'));
+    }
+    nextFn();
   });
 
   io.on('connection', (socket) => {

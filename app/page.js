@@ -4,10 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import Composer from './Composer';
 import { renderMarkdown } from './markdown';
-import db from './database/db.json';
 
 const AUTH_KEY = 'chat-auth';
-const SESSION_MS = 30 * 60 * 1000; // 30 minutes
 
 const readAuth = () => {
   if (typeof window === 'undefined') return null;
@@ -23,21 +21,25 @@ const clearAuth = () => {
   if (typeof window !== 'undefined') window.localStorage.removeItem(AUTH_KEY);
 };
 
-// True only if the stored password still matches and the session hasn't expired.
+// Cheap client-side gate: was the token still in-window last we heard? The
+// authoritative check is server-side — POST /api/login mints it, and every
+// mutating call (socket handshake, POST /api/password) verifies it.
 const isAuthValid = () => {
   const rec = readAuth();
   if (!rec || typeof rec !== 'object') return false;
-  if (rec.pwd !== db.pwd) return false;
-  if (typeof rec.ts !== 'number') return false;
-  return Date.now() - rec.ts <= SESSION_MS;
+  if (typeof rec.token !== 'string' || !rec.token) return false;
+  if (typeof rec.expiresAt !== 'number') return false;
+  return rec.expiresAt > Date.now();
 };
+
+const getToken = () => readAuth()?.token || '';
 
 const EDIT_KEY = 'edit';
 
 // Fixed panel that appears in the top-left corner on every route (login,
-// join, chat). Only rendered when localStorage.edit === 'true'. Contains a
-// "change password" form that writes the new pwd to db.json via /api/password
-// and reloads so the client picks up the fresh bundled JSON.
+// join, chat). Only rendered when localStorage.edit === 'true'. Sends the
+// bearer token so the server can enforce that only a logged-in user can
+// change the password.
 function MenuBar() {
   const [enabled, setEnabled] = useState(false);
   const [open, setOpen] = useState(false);
@@ -59,16 +61,21 @@ function MenuBar() {
     setBusy(true);
     setStatus('Saving…');
     try {
+      const token = getToken();
       const res = await fetch('/api/password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ pwd }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Save failed.');
       setStatus('Saved. Reloading…');
-      // The stored auth (old pwd) won't match the new db.pwd — purge it so
-      // the reload lands on the login screen with a clean slate.
+      // Force everyone on this browser back to the login screen — the token
+      // we hold was minted against the old pwd, and the new pwd is now the
+      // one users need to type.
       window.localStorage.removeItem(AUTH_KEY);
       setTimeout(() => window.location.reload(), 400);
     } catch (err) {
@@ -261,12 +268,19 @@ export default function Home() {
     const socket = io({
       path: '/socket.io',
       query: { username },
+      auth: { token: getToken() },
       transports: ['websocket', 'polling'],
     });
     socketRef.current = socket;
 
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
+    // Fired when io.use() rejects the handshake — treat it as expired auth.
+    socket.on('connect_error', (err) => {
+      if (err?.message === 'unauthorized') {
+        logout();
+      }
+    });
 
     socket.on('message', (msg) =>
       setMessages((prev) => [...prev, { ...msg, kind: 'message' }])
@@ -361,11 +375,24 @@ export default function Home() {
     }
   };
 
-  // Rehydrate a prior password unlock so a refresh doesn't ask again — but
-  // only if the stored password still matches and the 30-min window is alive.
+  // Rehydrate on mount. Trust the local expiry first (so a refresh feels
+  // instant), then do a background /api/session check to confirm the token
+  // still verifies on the server — catches password changes and secret
+  // rotations while the tab was closed.
   useEffect(() => {
-    if (isAuthValid()) setAuthed(true);
-    else clearAuth();
+    if (!isAuthValid()) {
+      clearAuth();
+      return;
+    }
+    setAuthed(true);
+    fetch('/api/session', {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .catch(() => {
+        clearAuth();
+        setAuthed(false);
+      });
   }, []);
 
   // While authed, re-check the stored pwd + timestamp on an interval and
@@ -388,18 +415,29 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed]);
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
-    if (pwdInput === db.pwd) {
+    if (!pwdInput) return;
+    setPwdError('');
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pwd: pwdInput }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        setPwdError(data.error || 'Incorrect password.');
+        return;
+      }
       window.localStorage.setItem(
         AUTH_KEY,
-        JSON.stringify({ pwd: pwdInput, ts: Date.now() })
+        JSON.stringify({ token: data.token, expiresAt: data.expiresAt })
       );
       setAuthed(true);
-      setPwdError('');
       setPwdInput('');
-    } else {
-      setPwdError('Incorrect password.');
+    } catch {
+      setPwdError('Could not reach the server.');
     }
   };
 
