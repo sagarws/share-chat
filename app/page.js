@@ -37,9 +37,7 @@ const getToken = () => readAuth()?.token || '';
 const EDIT_KEY = 'edit';
 
 // Fixed panel that appears in the top-left corner on every route (login,
-// join, chat). Only rendered when localStorage.edit === 'true'. Sends the
-// bearer token so the server can enforce that only a logged-in user can
-// change the password.
+// join, chat). Only rendered when localStorage.edit === 'true'.
 function MenuBar() {
   const [enabled, setEnabled] = useState(false);
   const [open, setOpen] = useState(false);
@@ -61,13 +59,9 @@ function MenuBar() {
     setBusy(true);
     setStatus('Saving…');
     try {
-      const token = getToken();
       const res = await fetch('/api/password', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pwd }),
       });
       const data = await res.json().catch(() => ({}));

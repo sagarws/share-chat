@@ -1,24 +1,11 @@
 import { NextResponse } from 'next/server';
-import { setPassword, verifyToken } from '../../../db';
+import { setPassword } from '../../../db';
 
 export const runtime = 'nodejs';
 
-const readToken = (req) => {
-  const header = req.headers.get('authorization') || '';
-  const [scheme, value] = header.split(' ');
-  return scheme?.toLowerCase() === 'bearer' ? value : '';
-};
-
-// Change the stored password. Requires a valid session token (i.e. the caller
-// has already logged in). No previous-password prompt, per product spec.
+// Gated on the client by localStorage.edit === 'true'; the server does not
+// re-check auth here.
 export async function POST(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json(
-      { ok: false, error: 'Not authenticated.' },
-      { status: 401 }
-    );
-  }
-
   let body;
   try {
     body = await req.json();
