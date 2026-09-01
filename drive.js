@@ -105,7 +105,7 @@ const createAppFolder = async () => {
  * @param {number}  opts.size          exact byte length of `body`
  * @param {ReadableStream|Buffer} opts.body
  */
-const uploadFile = async ({ name, mime, size, body }) => {
+const uploadFile = async ({ name, mime, size, uploader, body }) => {
   const startSession = async (folderId) =>
     fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
       method: 'POST',
@@ -115,7 +115,14 @@ const uploadFile = async ({ name, mime, size, body }) => {
         'X-Upload-Content-Type': mime,
         'X-Upload-Content-Length': String(size),
       },
-      body: JSON.stringify({ name, parents: [folderId] }),
+      body: JSON.stringify({
+        name,
+        parents: [folderId],
+        // appProperties are private to this OAuth client, so the uploader's
+        // name rides along with the file instead of living in a local table
+        // that a redeploy would wipe.
+        appProperties: uploader ? { uploader } : undefined,
+      }),
     });
 
   // Prefer a folder we created earlier (see the 404 fallback below), else the
@@ -163,6 +170,75 @@ const uploadFile = async ({ name, mime, size, body }) => {
   return created.id;
 };
 
+const FILE_FIELDS = 'id,name,mimeType,size,createdTime,appProperties';
+
+/**
+ * List every file this app created, newest first.
+ *
+ * Under the drive.file scope Drive only ever returns files created by this
+ * OAuth client, so the result set is exactly our uploads — no parent filter
+ * needed, and nothing to reconcile against a local database. This is what
+ * makes the listing survive a wiped disk.
+ */
+const listDriveFiles = async () => {
+  const out = [];
+  let pageToken = '';
+
+  do {
+    const params = new URLSearchParams({
+      q: "mimeType != 'application/vnd.google-apps.folder' and trashed = false",
+      fields: `nextPageToken, files(${FILE_FIELDS})`,
+      orderBy: 'createdTime desc',
+      pageSize: '200',
+      supportsAllDrives: 'true',
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+
+    const res = await fetch(`${FILES_API}?${params}`, { headers: await authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(
+        `Drive listing failed (${res.status}). ${JSON.stringify(data).slice(0, 300)}`
+      );
+    }
+
+    for (const f of data.files || []) {
+      out.push({
+        id: f.id,
+        name: f.name,
+        mime: f.mimeType || 'application/octet-stream',
+        size: Number(f.size) || 0,
+        uploader: f.appProperties?.uploader || '',
+        createdAt: Date.parse(f.createdTime) || 0,
+      });
+    }
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+
+  return out;
+};
+
+/** Metadata for one file, or null if it is gone. */
+const getFileMeta = async (fileId) => {
+  const res = await fetch(
+    `${FILES_API}/${encodeURIComponent(fileId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
+    { headers: await authHeaders() }
+  );
+  if (res.status === 404) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Drive lookup failed (${res.status}). ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  return {
+    id: data.id,
+    name: data.name,
+    mime: data.mimeType || 'application/octet-stream',
+    size: Number(data.size) || 0,
+    uploader: data.appProperties?.uploader || '',
+    createdAt: Date.parse(data.createdTime) || 0,
+  };
+};
+
 /**
  * Open a Drive file for reading. Returns the raw fetch Response so the caller
  * can hand `.body` straight to the client without buffering.
@@ -191,4 +267,11 @@ const deleteFile = async (fileId) => {
   }
 };
 
-module.exports = { isConfigured, uploadFile, downloadFile, deleteFile };
+module.exports = {
+  isConfigured,
+  uploadFile,
+  listDriveFiles,
+  getFileMeta,
+  downloadFile,
+  deleteFile,
+};

@@ -23,19 +23,6 @@ db.exec(`
   );
 `);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS files (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    mime        TEXT NOT NULL,
-    size        INTEGER NOT NULL,
-    uploader    TEXT NOT NULL DEFAULT '',
-    storage_key TEXT NOT NULL,
-    created_at  INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS files_created_at ON files (created_at DESC);
-`);
-
 const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
 const setStmt = db.prepare(
   'INSERT INTO settings (key, value) VALUES (?, ?) ' +
@@ -48,7 +35,15 @@ const setSetting = (key, value) => setStmt.run(key, String(value));
 // Seed a random HMAC secret on first boot. If it disappears (e.g. a wiped
 // disk), all outstanding tokens become invalid — that's fine, users just
 // re-login.
-if (!getSetting('auth_secret')) {
+// Prefer AUTH_SECRET from the environment. On a host with no persistent disk
+// (Render's free plan wipes ./data on every redeploy) a generated secret would
+// change each deploy, invalidating everyone's session. An env-provided secret
+// keeps sessions alive across deploys.
+if (process.env.AUTH_SECRET) {
+  if (getSetting('auth_secret') !== process.env.AUTH_SECRET) {
+    setSetting('auth_secret', process.env.AUTH_SECRET);
+  }
+} else if (!getSetting('auth_secret')) {
   setSetting('auth_secret', crypto.randomBytes(32).toString('hex'));
 }
 
@@ -113,29 +108,10 @@ const verifyToken = (token) => {
 const getDriveFolder = () => getSetting('drive_folder_id');
 const setDriveFolder = (id) => setSetting('drive_folder_id', id);
 
-// --- shared files -----------------------------------------------------------
-
-const insertFileStmt = db.prepare(
-  'INSERT INTO files (id, name, mime, size, uploader, storage_key, created_at) ' +
-    'VALUES (@id, @name, @mime, @size, @uploader, @storage_key, @created_at)'
-);
-const listFilesStmt = db.prepare('SELECT * FROM files ORDER BY created_at DESC');
-const getFileStmt = db.prepare('SELECT * FROM files WHERE id = ?');
-const deleteFileStmt = db.prepare('DELETE FROM files WHERE id = ?');
-
-const addFile = (row) => insertFileStmt.run(row);
-const listFiles = () => listFilesStmt.all();
-const getFile = (id) => getFileStmt.get(id) ?? null;
-const removeFile = (id) => deleteFileStmt.run(id).changes > 0;
-
 module.exports = {
   SESSION_MS,
   getDriveFolder,
   setDriveFolder,
-  addFile,
-  listFiles,
-  getFile,
-  removeFile,
   getPassword,
   setPassword,
   signToken,

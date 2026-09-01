@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
-import crypto from 'node:crypto';
-import { verifyToken, addFile, listFiles } from '../../../db';
-import { isConfigured, uploadFile } from '../../../drive';
+import { verifyToken } from '../../../db';
+import { isConfigured, uploadFile, listDriveFiles } from '../../../drive';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -21,30 +20,33 @@ const readToken = (req) => {
   return scheme?.toLowerCase() === 'bearer' ? value : '';
 };
 
-const publicRow = (row) => ({
-  id: row.id,
-  name: row.name,
-  mime: row.mime,
-  size: row.size,
-  uploader: row.uploader,
-  createdAt: row.created_at,
-});
-
+// Google Drive is the single source of truth for the listing. Nothing about a
+// shared file lives in the local database, so a wiped disk (Render's free plan
+// clears it on every redeploy) costs nothing — the list rebuilds itself from
+// Drive on the next request.
 export async function GET(req) {
   if (!verifyToken(readToken(req))) {
     return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
   }
+  if (!isConfigured()) {
+    return NextResponse.json({
+      ok: true,
+      configured: false,
+      maxBytes: MAX_UPLOAD_BYTES,
+      files: [],
+    });
+  }
   try {
     return NextResponse.json({
       ok: true,
-      configured: isConfigured(),
+      configured: true,
       maxBytes: MAX_UPLOAD_BYTES,
-      files: listFiles().map(publicRow),
+      files: await listDriveFiles(),
     });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err?.message || 'Could not read files.' },
-      { status: 500 }
+      { status: 502 }
     );
   }
 }
@@ -61,8 +63,8 @@ export async function POST(req) {
       {
         ok: false,
         error:
-          'Google Drive is not configured yet. Run scripts/get-google-refresh-token.js ' +
-          'and restart the server.',
+          'Google Drive is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ' +
+          'GOOGLE_REFRESH_TOKEN and GOOGLE_DRIVE_FOLDER_ID in the environment.',
       },
       { status: 503 }
     );
@@ -97,18 +99,11 @@ export async function POST(req) {
   }
 
   try {
-    const driveId = await uploadFile({ name, mime, size, body: req.body });
-    const row = {
-      id: crypto.randomUUID(),
-      name,
-      mime,
-      size,
-      uploader,
-      storage_key: driveId,
-      created_at: Date.now(),
-    };
-    addFile(row);
-    return NextResponse.json({ ok: true, file: publicRow(row) });
+    const driveId = await uploadFile({ name, mime, size, uploader, body: req.body });
+    return NextResponse.json({
+      ok: true,
+      file: { id: driveId, name, mime, size, uploader, createdAt: Date.now() },
+    });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err?.message || 'Upload failed.' },
