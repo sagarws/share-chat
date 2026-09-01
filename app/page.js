@@ -3,116 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import Composer from './Composer';
+import MenuBar from './MenuBar';
 import { renderMarkdown } from './markdown';
-
-const AUTH_KEY = 'chat-auth';
-
-const readAuth = () => {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(AUTH_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-};
-
-const clearAuth = () => {
-  if (typeof window !== 'undefined') window.localStorage.removeItem(AUTH_KEY);
-};
-
-// Cheap client-side gate: was the token still in-window last we heard? The
-// authoritative check is server-side — POST /api/login mints it, and every
-// mutating call (socket handshake, POST /api/password) verifies it.
-const isAuthValid = () => {
-  const rec = readAuth();
-  if (!rec || typeof rec !== 'object') return false;
-  if (typeof rec.token !== 'string' || !rec.token) return false;
-  if (typeof rec.expiresAt !== 'number') return false;
-  return rec.expiresAt > Date.now();
-};
-
-const getToken = () => readAuth()?.token || '';
-
-const EDIT_KEY = 'edit';
-
-// Fixed panel that appears in the top-left corner on every route (login,
-// join, chat). Only rendered when localStorage.edit === 'true'.
-function MenuBar() {
-  const [enabled, setEnabled] = useState(false);
-  const [open, setOpen] = useState(false);
-  const [newPwd, setNewPwd] = useState('');
-  const [status, setStatus] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    setEnabled(window.localStorage.getItem(EDIT_KEY) === 'true');
-  }, []);
-
-  if (!enabled) return null;
-
-  const handleChange = async (e) => {
-    e.preventDefault();
-    const pwd = newPwd.trim();
-    if (!pwd || busy) return;
-    setBusy(true);
-    setStatus('Saving…');
-    try {
-      const res = await fetch('/api/password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pwd }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'Save failed.');
-      setStatus('Saved. Reloading…');
-      // Force everyone on this browser back to the login screen — the token
-      // we hold was minted against the old pwd, and the new pwd is now the
-      // one users need to type.
-      window.localStorage.removeItem(AUTH_KEY);
-      setTimeout(() => window.location.reload(), 400);
-    } catch (err) {
-      setStatus(err?.message || 'Save failed.');
-      setBusy(false);
-    }
-  };
-
-  return (
-    <aside className="menu-bar" aria-label="Editor menu">
-      <button
-        type="button"
-        className="menu-toggle"
-        onClick={() => {
-          setOpen((v) => !v);
-          setStatus('');
-        }}
-        aria-expanded={open}
-      >
-        {open ? 'Close' : 'Menu'}
-      </button>
-      {open && (
-        <form className="menu-panel" onSubmit={handleChange}>
-          <label htmlFor="new-pwd">New password</label>
-          <input
-            id="new-pwd"
-            type="text"
-            autoComplete="off"
-            value={newPwd}
-            onChange={(e) => setNewPwd(e.target.value)}
-            maxLength={100}
-            autoFocus
-            disabled={busy}
-          />
-          <button type="submit" disabled={!newPwd.trim() || busy}>
-            Change password
-          </button>
-          {status && <span className="menu-status">{status}</span>}
-        </form>
-      )}
-    </aside>
-  );
-}
+import { AUTH_KEY, clearAuth, isAuthValid, getToken } from './auth';
 
 // Keep in sync with the same-named constants in server.js.
 const MAX_FILE_BYTES = 10000 * 1024 * 1024;
@@ -438,6 +331,12 @@ export default function Home() {
   const handleJoin = (e) => {
     e.preventDefault();
     if (!username.trim()) return;
+    // Remembered for this tab so /files can label uploads with a name.
+    try {
+      window.sessionStorage.setItem('chat-username', username.trim());
+    } catch {
+      // private mode / storage disabled — uploads just go unattributed
+    }
     setJoined(true);
   };
 
@@ -564,7 +463,7 @@ export default function Home() {
   if (!authed) {
     return (
       <>
-        <MenuBar />
+        <MenuBar authed={false} current="chat" />
         <div className="screen center">
           <form className="join-card" onSubmit={handleLogin}>
             <h1>Sign in</h1>
@@ -593,7 +492,7 @@ export default function Home() {
   if (!joined) {
     return (
       <>
-        <MenuBar />
+        <MenuBar authed current="chat" />
         <div className="screen center">
           <form className="join-card" onSubmit={handleJoin}>
             <h1>Join Chat</h1>
@@ -616,7 +515,7 @@ export default function Home() {
 
   return (
     <>
-      <MenuBar />
+      <MenuBar authed current="chat" />
       <div className="screen">
         <header className="header">
         <div>

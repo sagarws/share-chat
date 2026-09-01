@@ -23,6 +23,19 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS files (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    mime        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    uploader    TEXT NOT NULL DEFAULT '',
+    storage_key TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS files_created_at ON files (created_at DESC);
+`);
+
 const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
 const setStmt = db.prepare(
   'INSERT INTO settings (key, value) VALUES (?, ?) ' +
@@ -94,8 +107,35 @@ const verifyToken = (token) => {
   return { issuedAt, expiresAt: issuedAt + SESSION_MS };
 };
 
+// Where uploads land in Drive. Normally GOOGLE_DRIVE_FOLDER_ID, but if that
+// folder is unreachable under the drive.file scope the app creates its own and
+// remembers the id here.
+const getDriveFolder = () => getSetting('drive_folder_id');
+const setDriveFolder = (id) => setSetting('drive_folder_id', id);
+
+// --- shared files -----------------------------------------------------------
+
+const insertFileStmt = db.prepare(
+  'INSERT INTO files (id, name, mime, size, uploader, storage_key, created_at) ' +
+    'VALUES (@id, @name, @mime, @size, @uploader, @storage_key, @created_at)'
+);
+const listFilesStmt = db.prepare('SELECT * FROM files ORDER BY created_at DESC');
+const getFileStmt = db.prepare('SELECT * FROM files WHERE id = ?');
+const deleteFileStmt = db.prepare('DELETE FROM files WHERE id = ?');
+
+const addFile = (row) => insertFileStmt.run(row);
+const listFiles = () => listFilesStmt.all();
+const getFile = (id) => getFileStmt.get(id) ?? null;
+const removeFile = (id) => deleteFileStmt.run(id).changes > 0;
+
 module.exports = {
   SESSION_MS,
+  getDriveFolder,
+  setDriveFolder,
+  addFile,
+  listFiles,
+  getFile,
+  removeFile,
   getPassword,
   setPassword,
   signToken,
