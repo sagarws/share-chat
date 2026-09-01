@@ -10,59 +10,89 @@ const SESSION_MS = 30 * 60 * 1000;
 // On Render, mount a Persistent Disk at /var/data and set DB_PATH=/var/data/app.db.
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db');
 
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+// The database is opened lazily, on first use.
+//
+// `next build` imports every route module in several parallel workers to
+// collect page data. If opening the database happened at import time, each
+// worker would race to create the file, switch it to WAL (which needs an
+// exclusive lock) and write the seed rows — which fails the build with
+// SQLITE_BUSY. Nothing here runs until a request actually asks for a setting.
+let db = null;
+let getStmt = null;
+let setStmt = null;
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const getSetting = (key) => {
+  init();
+  return getStmt.get(key)?.value ?? null;
+};
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+const setSetting = (key, value) => {
+  init();
+  return setStmt.run(key, String(value));
+};
+
+function init() {
+  if (db) return db;
+
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+  const handle = new Database(DB_PATH);
+  // Wait for a competing writer rather than failing instantly. Set before the
+  // journal_mode switch, which is itself a locking operation.
+  handle.pragma('busy_timeout = 5000');
+  handle.pragma('journal_mode = WAL');
+  handle.pragma('foreign_keys = ON');
+
+  handle.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  getStmt = handle.prepare('SELECT value FROM settings WHERE key = ?');
+  setStmt = handle.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ' +
+      'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
   );
-`);
 
-const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-const setStmt = db.prepare(
-  'INSERT INTO settings (key, value) VALUES (?, ?) ' +
-    'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-);
-
-const getSetting = (key) => getStmt.get(key)?.value ?? null;
-const setSetting = (key, value) => setStmt.run(key, String(value));
-
-// Seed a random HMAC secret on first boot. If it disappears (e.g. a wiped
-// disk), all outstanding tokens become invalid — that's fine, users just
-// re-login.
-// Prefer AUTH_SECRET from the environment. On a host with no persistent disk
-// (Render's free plan wipes ./data on every redeploy) a generated secret would
-// change each deploy, invalidating everyone's session. An env-provided secret
-// keeps sessions alive across deploys.
-if (process.env.AUTH_SECRET) {
-  if (getSetting('auth_secret') !== process.env.AUTH_SECRET) {
-    setSetting('auth_secret', process.env.AUTH_SECRET);
-  }
-} else if (!getSetting('auth_secret')) {
-  setSetting('auth_secret', crypto.randomBytes(32).toString('hex'));
+  // Assign before seeding: seed() goes through getSetting/setSetting, which
+  // call init() again and must short-circuit here.
+  db = handle;
+  seed();
+  return db;
 }
 
-// Seed the password. Prefer env → legacy db.json (one-shot migration) →
-// hardcoded fallback so a fresh boot on Render still logs in with something.
-if (!getSetting('pwd')) {
-  let seed = process.env.INITIAL_PASSWORD || '';
-  if (!seed) {
-    try {
-      const legacy = path.join(process.cwd(), 'app', 'database', 'db.json');
-      if (fs.existsSync(legacy)) {
-        const raw = JSON.parse(fs.readFileSync(legacy, 'utf8'));
-        if (typeof raw?.pwd === 'string' && raw.pwd) seed = raw.pwd;
-      }
-    } catch {
-      // ignore — fall through to default
+function seed() {
+  // Prefer AUTH_SECRET from the environment. On a host with no persistent disk
+  // (Render's free plan wipes ./data on every redeploy) a generated secret would
+  // change each deploy, invalidating everyone's session. An env-provided secret
+  // keeps sessions alive across deploys.
+  if (process.env.AUTH_SECRET) {
+    if (getSetting('auth_secret') !== process.env.AUTH_SECRET) {
+      setSetting('auth_secret', process.env.AUTH_SECRET);
     }
+  } else if (!getSetting('auth_secret')) {
+    setSetting('auth_secret', crypto.randomBytes(32).toString('hex'));
   }
-  setSetting('pwd', seed || 'change-me');
+
+  // Seed the password. Prefer env → legacy db.json (one-shot migration) →
+  // hardcoded fallback so a fresh boot on Render still logs in with something.
+  if (!getSetting('pwd')) {
+    let value = process.env.INITIAL_PASSWORD || '';
+    if (!value) {
+      try {
+        const legacy = path.join(process.cwd(), 'app', 'database', 'db.json');
+        if (fs.existsSync(legacy)) {
+          const raw = JSON.parse(fs.readFileSync(legacy, 'utf8'));
+          if (typeof raw?.pwd === 'string' && raw.pwd) value = raw.pwd;
+        }
+      } catch {
+        // ignore — fall through to default
+      }
+    }
+    setSetting('pwd', value || 'change-me');
+  }
 }
 
 const getPassword = () => getSetting('pwd');
