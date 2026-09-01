@@ -249,18 +249,12 @@ export default function FilesPage() {
     `/api/files/${id}?token=${encodeURIComponent(getToken())}`;
 
   // Copy a Google Drive link. This asks the server to grant "anyone with the
-  // link can view" on the Drive file, so the resulting URL works for people
-  // who do not have the app's password — that is the point of it, and why the
-  // button warns before the first share.
+  // link can view" on the Drive file, so the resulting URL works for people who
+  // do not have the app's password — that is the point of it. Sharing happens
+  // on the first click with no prompt; the 🌐 badge in the list is what marks a
+  // file as public afterwards.
   const handleCopy = async (row) => {
     if (copying) return;
-    if (!row.shared) {
-      const ok = window.confirm(
-        `Create a public Google Drive link for "${row.name}"?\n\n` +
-          'Anyone with the link will be able to view this file without signing in.'
-      );
-      if (!ok) return;
-    }
     setCopying(row.id);
     setError('');
     try {
