@@ -51,6 +51,8 @@ export default function FilesPage() {
   const [upload, setUpload] = useState(null); // { name, size, percent }
   const [dragging, setDragging] = useState(false);
   const [deleting, setDeleting] = useState('');
+  const [copied, setCopied] = useState('');
+  const [copying, setCopying] = useState('');
 
   const inputRef = useRef(null);
   const xhrRef = useRef(null);
@@ -82,12 +84,40 @@ export default function FilesPage() {
   // Gate the page on the same token the chat uses, then fetch the list.
   useEffect(() => {
     if (!isAuthValid()) {
+      // Remember the shared link so signing in lands them on the right file
+      // instead of dumping them in the chat.
+      try {
+        window.sessionStorage.setItem(
+          'post-login-redirect',
+          window.location.pathname + window.location.search
+        );
+      } catch {
+        // storage disabled — they'll just land on the chat after signing in
+      }
       router.replace('/');
       return;
     }
     setReady(true);
     load();
   }, [router, load]);
+
+  // A ?f=<id> link opens the file directly. Done once the list has loaded so
+  // an id that no longer exists can be reported instead of silently failing.
+  useEffect(() => {
+    if (!ready || loading) return;
+    const wanted = new URLSearchParams(window.location.search).get('f');
+    if (!wanted) return;
+
+    window.history.replaceState({}, '', '/files');
+    const row = files.find((f) => f.id === wanted);
+    if (!row) {
+      setError('That shared file is no longer available.');
+      return;
+    }
+    window.location.href = downloadHref(row.id);
+    // downloadHref is stable for a given token; files/loading drive this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, loading, files]);
 
   // Mirror the chat's session watchdog so a page left open eventually logs out.
   useEffect(() => {
@@ -199,6 +229,68 @@ export default function FilesPage() {
   const downloadHref = (id) =>
     `/api/files/${id}?token=${encodeURIComponent(getToken())}`;
 
+  // Copy a Google Drive link. This asks the server to grant "anyone with the
+  // link can view" on the Drive file, so the resulting URL works for people
+  // who do not have the app's password — that is the point of it, and why the
+  // button warns before the first share.
+  const handleCopy = async (row) => {
+    if (copying) return;
+    if (!row.shared) {
+      const ok = window.confirm(
+        `Create a public Google Drive link for "${row.name}"?\n\n` +
+          'Anyone with the link will be able to view this file without signing in.'
+      );
+      if (!ok) return;
+    }
+    setCopying(row.id);
+    setError('');
+    try {
+      const res = await fetch(`/api/files/${row.id}/share`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (res.status === 401) return logout();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok || !data.link) {
+        throw new Error(data.error || 'Could not create a share link.');
+      }
+
+      try {
+        await navigator.clipboard.writeText(data.link);
+      } catch {
+        // clipboard API needs a secure context; fall back to a hidden textarea
+        const ta = document.createElement('textarea');
+        ta.value = data.link;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const worked = (() => {
+          try {
+            return document.execCommand('copy');
+          } catch {
+            return false;
+          }
+        })();
+        document.body.removeChild(ta);
+        if (!worked) {
+          setError(`Copy failed. Link: ${data.link}`);
+          return;
+        }
+      }
+
+      setFiles((prev) =>
+        prev.map((f) => (f.id === row.id ? { ...f, shared: true, link: data.link } : f))
+      );
+      setCopied(row.id);
+      setTimeout(() => setCopied((c) => (c === row.id ? '' : c)), 1600);
+    } catch (err) {
+      setError(err?.message || 'Could not create a share link.');
+    } finally {
+      setCopying('');
+    }
+  };
+
   if (!ready) return null;
 
   return (
@@ -287,8 +379,23 @@ export default function FilesPage() {
                     <span className="file-meta">
                       {formatSize(f.size)}
                       {f.uploader ? ` · ${f.uploader}` : ''} · {formatWhen(f.createdAt)}
+                      {f.shared ? ' · 🌐 public link' : ''}
                     </span>
                   </span>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => handleCopy(f)}
+                    disabled={copying === f.id}
+                    aria-label={`Copy Google Drive link to ${f.name}`}
+                    title={
+                      f.shared
+                        ? 'Copy public Google Drive link'
+                        : 'Create a public Google Drive link'
+                    }
+                  >
+                    {copied === f.id ? '✅' : copying === f.id ? '…' : '🔗'}
+                  </button>
                   <a className="icon-btn" href={downloadHref(f.id)} download={f.name} aria-label={`Download ${f.name}`}>
                     ⬇️
                   </a>

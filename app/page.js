@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import Composer from './Composer';
 import MenuBar from './MenuBar';
 import { renderMarkdown } from './markdown';
@@ -135,6 +136,7 @@ function Attachment({ message: m }) {
 
 export default function Home() {
   const [authed, setAuthed] = useState(false);
+  const router = useRouter();
   const [pwdInput, setPwdInput] = useState('');
   const [pwdError, setPwdError] = useState('');
   const [username, setUsername] = useState('');
@@ -324,6 +326,18 @@ export default function Home() {
       );
       setAuthed(true);
       setPwdInput('');
+
+      // Someone who followed a /files?f=... share link gets sent back there
+      // rather than dropped into the chat.
+      try {
+        const next = window.sessionStorage.getItem('post-login-redirect');
+        if (next) {
+          window.sessionStorage.removeItem('post-login-redirect');
+          router.replace(next);
+        }
+      } catch {
+        // storage disabled — stay on the chat
+      }
     } catch {
       setPwdError('Could not reach the server.');
     }

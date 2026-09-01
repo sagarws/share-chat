@@ -170,7 +170,8 @@ const uploadFile = async ({ name, mime, size, uploader, body }) => {
   return created.id;
 };
 
-const FILE_FIELDS = 'id,name,mimeType,size,createdTime,appProperties';
+const FILE_FIELDS =
+  'id,name,mimeType,size,createdTime,appProperties,webViewLink,shared';
 
 /**
  * List every file this app created, newest first.
@@ -210,6 +211,8 @@ const listDriveFiles = async () => {
         size: Number(f.size) || 0,
         uploader: f.appProperties?.uploader || '',
         createdAt: Date.parse(f.createdTime) || 0,
+        link: f.webViewLink || '',
+        shared: Boolean(f.shared),
       });
     }
     pageToken = data.nextPageToken || '';
@@ -236,6 +239,8 @@ const getFileMeta = async (fileId) => {
     size: Number(data.size) || 0,
     uploader: data.appProperties?.uploader || '',
     createdAt: Date.parse(data.createdTime) || 0,
+    link: data.webViewLink || '',
+    shared: Boolean(data.shared),
   };
 };
 
@@ -255,6 +260,38 @@ const downloadFile = async (fileId) => {
   return res;
 };
 
+/**
+ * Make a file readable by anyone holding its link, and return that link.
+ *
+ * This deliberately steps outside the app's password gate: the returned URL
+ * works for anyone, signed in or not. Only called when a user explicitly asks
+ * for a shareable Drive link.
+ */
+const shareFile = async (fileId) => {
+  const meta = await getFileMeta(fileId);
+  if (!meta) return null;
+
+  if (!meta.shared) {
+    const res = await fetch(
+      `${FILES_API}/${encodeURIComponent(fileId)}/permissions?supportsAllDrives=true`,
+      {
+        method: 'POST',
+        headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+      }
+    );
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Could not share the file (${res.status}). ${detail.slice(0, 300)}`);
+    }
+  }
+
+  // webViewLink is only populated once the file is readable, so re-read it.
+  const fresh = await getFileMeta(fileId);
+  const link = fresh?.link || `https://drive.google.com/file/d/${fileId}/view`;
+  return link;
+};
+
 /** Delete a Drive file. A 404 counts as success — it's already gone. */
 const deleteFile = async (fileId) => {
   const res = await fetch(
@@ -272,6 +309,7 @@ module.exports = {
   uploadFile,
   listDriveFiles,
   getFileMeta,
+  shareFile,
   downloadFile,
   deleteFile,
 };
