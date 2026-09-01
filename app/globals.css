@@ -858,3 +858,65 @@ button:disabled {
   background: #3a1313;
   border-color: #5a1d1d;
 }
+
+/* --- policy documents ----------------------------------------------------- */
+
+.doc {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 40px 20px 64px;
+  line-height: 1.65;
+}
+
+.doc h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+}
+
+.doc h2 {
+  margin: 32px 0 8px;
+  font-size: 16px;
+  color: #cfd4e2;
+}
+
+.doc p,
+.doc li {
+  color: #b9c0d0;
+}
+
+.doc ul {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.doc a {
+  color: #8aa2ff;
+}
+
+.doc code {
+  background: #171a21;
+  border: 1px solid #2a2f3e;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 13px;
+}
+
+.doc-nav {
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid #1e2230;
+  font-size: 14px;
+}
+
+.legal-links {
+  margin-top: 14px;
+  font-size: 12px;
+  text-align: center;
+  color: #8a93a6;
+}
+
+.legal-links a {
+  color: #8a93a6;
+}

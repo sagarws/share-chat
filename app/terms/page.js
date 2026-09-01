@@ -1,0 +1,81 @@
+import Link from 'next/link';
+
+export const metadata = {
+  title: 'Terms of Service · Share Chat',
+  description: 'The terms you agree to when using Share Chat.',
+};
+
+const UPDATED = '1 September 2026';
+const CONTACT = 'sagar.vavadiya.ws@gmail.com';
+
+export default function TermsPage() {
+  return (
+    <div className="doc">
+      <h1>Terms of Service</h1>
+      <p className="muted">Last updated: {UPDATED}</p>
+
+      <p>
+        Share Chat is a small personal project offering password-protected chat
+        and file sharing to a private group. By using it you agree to these
+        terms.
+      </p>
+
+      <h2>Access</h2>
+      <p>
+        Access requires a shared password given to you by the operator. Do not
+        pass it to anyone the operator has not invited. Access may be withdrawn
+        at any time, for any reason, without notice.
+      </p>
+
+      <h2>Acceptable use</h2>
+      <ul>
+        <li>Do not upload unlawful material, malware, or anything you have no right to share.</li>
+        <li>Do not use the app to harass anyone.</li>
+        <li>Do not attempt to break, overload, or gain unauthorised access to the service.</li>
+        <li>Do not use it to store anything genuinely confidential or regulated.</li>
+      </ul>
+
+      <h2>Your content</h2>
+      <p>
+        You keep ownership of everything you upload. You grant the operator only
+        the permission needed to store and serve it back to other users of this
+        app. Anyone signed in can view, download, and delete any shared file, so
+        treat every upload as visible to the whole group.
+      </p>
+      <p>
+        The operator may remove any content at any time, including content that
+        breaks these terms.
+      </p>
+
+      <h2>No warranty</h2>
+      <p>
+        The service is provided &ldquo;as is&rdquo;, with no warranty of any
+        kind. It may be slow, unavailable, or discontinued without notice.
+        Chat messages are never stored, and uploaded files may be lost. Keep
+        your own copy of anything you care about.
+      </p>
+
+      <h2>Limitation of liability</h2>
+      <p>
+        To the fullest extent permitted by law, the operator is not liable for
+        any loss or damage arising from use of the service, including lost data
+        or lost files.
+      </p>
+
+      <h2>Changes</h2>
+      <p>
+        These terms may change; the date at the top of this page will change
+        with them. Continuing to use the app means accepting the current terms.
+      </p>
+
+      <h2>Contact</h2>
+      <p>
+        <a href={`mailto:${CONTACT}`}>{CONTACT}</a>
+      </p>
+
+      <p className="doc-nav">
+        <Link href="/">← Back to Share Chat</Link> · <Link href="/privacy">Privacy Policy</Link>
+      </p>
+    </div>
+  );
+}

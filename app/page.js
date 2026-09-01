@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import Link from 'next/link';
 import Composer from './Composer';
 import MenuBar from './MenuBar';
 import { renderMarkdown } from './markdown';
@@ -484,6 +485,10 @@ export default function Home() {
               Unlock
             </button>
           </form>
+          <p className="legal-links">
+            <Link href="/privacy">Privacy Policy</Link> ·{' '}
+            <Link href="/terms">Terms of Service</Link>
+          </p>
         </div>
       </>
     );
