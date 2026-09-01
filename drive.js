@@ -171,7 +171,7 @@ const uploadFile = async ({ name, mime, size, uploader, body }) => {
 };
 
 const FILE_FIELDS =
-  'id,name,mimeType,size,createdTime,appProperties,webViewLink,shared';
+  'id,name,mimeType,size,createdTime,appProperties,webViewLink,shared,thumbnailLink';
 
 /**
  * List every file this app created, newest first.
@@ -213,6 +213,9 @@ const listDriveFiles = async () => {
         createdAt: Date.parse(f.createdTime) || 0,
         link: f.webViewLink || '',
         shared: Boolean(f.shared),
+        // The client only needs to know a preview exists; the URL itself is
+        // short-lived and is fetched server-side by /api/files/:id/thumb.
+        hasThumb: Boolean(f.thumbnailLink),
       });
     }
     pageToken = data.nextPageToken || '';
@@ -241,6 +244,8 @@ const getFileMeta = async (fileId) => {
     createdAt: Date.parse(data.createdTime) || 0,
     link: data.webViewLink || '',
     shared: Boolean(data.shared),
+    hasThumb: Boolean(data.thumbnailLink),
+    thumbnailLink: data.thumbnailLink || '',
   };
 };
 
@@ -257,6 +262,28 @@ const downloadFile = async (fileId) => {
     const detail = await res.text().catch(() => '');
     throw new Error(`Drive download failed (${res.status}). ${detail.slice(0, 300)}`);
   }
+  return res;
+};
+
+/**
+ * Fetch a file's Drive-rendered thumbnail (images, PDFs, video).
+ *
+ * thumbnailLink is a short-lived pre-signed URL, so it normally needs no
+ * Authorization header — but signed-URL behaviour varies, so fall back to an
+ * authorised request rather than showing a broken preview.
+ *
+ * @param {number} size  requested longest edge in px
+ */
+const getThumbnail = async (fileId, size = 400) => {
+  const meta = await getFileMeta(fileId);
+  if (!meta?.thumbnailLink) return null;
+
+  // Drive appends a size hint like "=s220"; swap it for the size we want.
+  const url = meta.thumbnailLink.replace(/=s\d+(-c)?$/, `=s${size}`);
+
+  let res = await fetch(url);
+  if (!res.ok) res = await fetch(url, { headers: await authHeaders() });
+  if (!res.ok) return null;
   return res;
 };
 
@@ -310,6 +337,7 @@ module.exports = {
   listDriveFiles,
   getFileMeta,
   shareFile,
+  getThumbnail,
   downloadFile,
   deleteFile,
 };

@@ -53,6 +53,7 @@ export default function FilesPage() {
   const [deleting, setDeleting] = useState('');
   const [copied, setCopied] = useState('');
   const [copying, setCopying] = useState('');
+  const [view, setView] = useState('list');
 
   const inputRef = useRef(null);
   const xhrRef = useRef(null);
@@ -98,6 +99,12 @@ export default function FilesPage() {
       return;
     }
     setReady(true);
+    try {
+      const saved = window.localStorage.getItem('files-view');
+      if (saved === 'grid' || saved === 'list') setView(saved);
+    } catch {
+      // storage disabled — default to list
+    }
     load();
   }, [router, load]);
 
@@ -197,6 +204,18 @@ export default function FilesPage() {
 
     xhr.send(file);
   };
+
+  const chooseView = (next) => {
+    setView(next);
+    try {
+      window.localStorage.setItem('files-view', next);
+    } catch {
+      // storage disabled — the choice just won't persist
+    }
+  };
+
+  const thumbHref = (id, size) =>
+    `/api/files/${id}/thumb?s=${size}&token=${encodeURIComponent(getToken())}`;
 
   const handleDelete = async (row) => {
     if (deleting) return;
@@ -302,6 +321,26 @@ export default function FilesPage() {
             <strong>File Share</strong>
             <span className="muted"> · {files.length} file{files.length === 1 ? '' : 's'}</span>
           </div>
+          <div className="view-toggle" role="group" aria-label="View">
+            <button
+              type="button"
+              className={view === 'list' ? 'active' : undefined}
+              onClick={() => chooseView('list')}
+              aria-pressed={view === 'list'}
+              title="List view"
+            >
+              ☰
+            </button>
+            <button
+              type="button"
+              className={view === 'grid' ? 'active' : undefined}
+              onClick={() => chooseView('grid')}
+              aria-pressed={view === 'grid'}
+              title="Gallery view"
+            >
+              ▦
+            </button>
+          </div>
         </header>
 
         <main
@@ -370,8 +409,83 @@ export default function FilesPage() {
           ) : files.length === 0 ? (
             <div className="empty muted">No files shared yet.</div>
           ) : (
-            <ul className="file-list">
-              {files.map((f) => (
+            <ul className={view === 'grid' ? 'file-grid' : 'file-list'}>
+              {files.map((f) =>
+                view === 'grid' ? (
+                  <li key={f.id} className="file-card">
+                    <a
+                      className="card-preview"
+                      href={downloadHref(f.id)}
+                      download={f.name}
+                      aria-label={`Download ${f.name}`}
+                    >
+                      {f.hasThumb ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={thumbHref(f.id, 400)}
+                          alt=""
+                          loading="lazy"
+                          onError={(e) => {
+                            // Drive has no preview for this one after all —
+                            // drop back to the type icon.
+                            e.currentTarget.style.display = 'none';
+                            e.currentTarget.nextSibling.style.display = 'flex';
+                          }}
+                        />
+                      ) : null}
+                      <span
+                        className="card-icon"
+                        style={f.hasThumb ? { display: 'none' } : undefined}
+                      >
+                        {iconFor(f.mime, f.name)}
+                      </span>
+                      {f.shared && <span className="card-badge" title="Public link">🌐</span>}
+                    </a>
+
+                    <div className="card-body">
+                      <span className="file-name" title={f.name}>
+                        {f.name}
+                      </span>
+                      <span className="file-meta">
+                        {formatSize(f.size)} · {formatWhen(f.createdAt)}
+                      </span>
+                    </div>
+
+                    <div className="card-actions">
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        onClick={() => handleCopy(f)}
+                        disabled={copying === f.id}
+                        aria-label={`Copy Google Drive link to ${f.name}`}
+                        title={
+                          f.shared
+                            ? 'Copy public Google Drive link'
+                            : 'Create a public Google Drive link'
+                        }
+                      >
+                        {copied === f.id ? '✅' : copying === f.id ? '…' : '🔗'}
+                      </button>
+                      <a
+                        className="icon-btn"
+                        href={downloadHref(f.id)}
+                        download={f.name}
+                        aria-label={`Download ${f.name}`}
+                      >
+                        ⬇️
+                      </a>
+                      <button
+                        type="button"
+                        className="icon-btn danger"
+                        onClick={() => handleDelete(f)}
+                        disabled={deleting === f.id}
+                        aria-label={`Delete ${f.name}`}
+                      >
+                        {deleting === f.id ? '…' : '🗑️'}
+                      </button>
+                    </div>
+                  </li>
+                ) : (
                 <li key={f.id} className="file-row">
                   <span className="file-icon">{iconFor(f.mime, f.name)}</span>
                   <span className="file-info">
@@ -409,7 +523,8 @@ export default function FilesPage() {
                     {deleting === f.id ? '…' : '🗑️'}
                   </button>
                 </li>
-              ))}
+                )
+              )}
             </ul>
           )}
         </main>
