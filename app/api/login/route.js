@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getPassword, signToken } from '../../../db';
+import { getPassword, signToken, SESSION_MS, PERSIST_MS } from '../../../db';
 
 export const runtime = 'nodejs';
 
@@ -29,6 +29,10 @@ export async function POST(req) {
     );
   }
 
-  const { token, expiresAt } = signToken();
+  // Edit-mode clients ask for a session that does not expire. The lifetime is
+  // signed into the token, so this is the only place it can be granted.
+  const ttl = body?.persist === true ? PERSIST_MS : SESSION_MS;
+
+  const { token, expiresAt } = signToken(Date.now(), ttl);
   return NextResponse.json({ ok: true, token, expiresAt });
 }

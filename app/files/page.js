@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import MenuBar from '../MenuBar';
+import Shell from '../Shell';
 import { clearAuth, isAuthValid, getToken } from '../auth';
+import { fileFromPaste } from '../clipboard';
 
 // Fallback only — the real cap comes from GET /api/files, which reads
 // MAX_UPLOAD_BYTES on the server. Keeping them in sync avoids a client-side
@@ -26,6 +27,14 @@ const formatWhen = (ts) => {
         ' · ' +
         d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
+
+// Types the in-app viewer can actually render. Everything else only offers a
+// download.
+const canPreview = (mime) =>
+  mime.startsWith('image/') ||
+  mime.startsWith('video/') ||
+  mime.startsWith('audio/') ||
+  mime === 'application/pdf';
 
 const iconFor = (mime, name) => {
   if (mime.startsWith('image/')) return '🖼️';
@@ -53,6 +62,7 @@ export default function FilesPage() {
   const [deleting, setDeleting] = useState('');
   const [copied, setCopied] = useState('');
   const [copying, setCopying] = useState('');
+  const [viewing, setViewing] = useState(null);
   const [view, setView] = useState('list');
 
   const inputRef = useRef(null);
@@ -214,8 +224,39 @@ export default function FilesPage() {
     }
   };
 
+  // `inline` makes the server send Content-Disposition: inline, so the browser
+  // renders the file instead of downloading it.
+  const viewHref = (id) =>
+    `/api/files/${id}?inline=1&token=${encodeURIComponent(getToken())}`;
+
   const thumbHref = (id, size) =>
     `/api/files/${id}/thumb?s=${size}&token=${encodeURIComponent(getToken())}`;
+
+  // Paste an image (or any copied file) anywhere on the page to upload it.
+  // Registered after `startUpload` exists and re-registered whenever the
+  // things it closes over change, so it never uploads with a stale cap.
+  useEffect(() => {
+    if (!ready) return;
+    const onPaste = (e) => {
+      const picked = fileFromPaste(e);
+      if (!picked) return;
+      e.preventDefault();
+      startUpload(picked);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+    // startUpload is redefined each render but only reads state we list here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, upload, maxBytes]);
+
+  useEffect(() => {
+    if (!viewing) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setViewing(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [viewing]);
 
   const handleDelete = async (row) => {
     if (deleting) return;
@@ -307,14 +348,13 @@ export default function FilesPage() {
   if (!ready) return null;
 
   return (
-    <>
-      <MenuBar authed current="files" />
-      <div className="screen">
-        <header className="header">
-          <div>
-            <strong>File Share</strong>
-            <span className="muted"> · {files.length} file{files.length === 1 ? '' : 's'}</span>
-          </div>
+    <Shell
+      title="File Share"
+      actions={
+        <>
+          <span className="muted">
+            {files.length} file{files.length === 1 ? '' : 's'}
+          </span>
           <div className="view-toggle" role="group" aria-label="View">
             <button
               type="button"
@@ -335,9 +375,10 @@ export default function FilesPage() {
               ▦
             </button>
           </div>
-        </header>
-
-        <main
+        </>
+      }
+    >
+      <div
           className={`files-main${dragging ? ' dragging' : ''}`}
           onDragOver={(e) => {
             e.preventDefault();
@@ -362,7 +403,7 @@ export default function FilesPage() {
           >
             <span className="drop-icon">⬆️</span>
             <span className="drop-title">
-              {upload ? 'Uploading…' : 'Click to choose a file, or drop it here'}
+              {upload ? 'Uploading…' : 'Click to choose a file, drop it here, or paste'}
             </span>
             <span className="drop-hint">Up to {formatSize(maxBytes)}</span>
           </button>
@@ -407,11 +448,17 @@ export default function FilesPage() {
               {files.map((f) =>
                 view === 'grid' ? (
                   <li key={f.id} className="file-card">
-                    <a
+                    {/* Opens the viewer for previewable files; otherwise
+                        falls back to downloading. */}
+                    <button
+                      type="button"
                       className="card-preview"
-                      href={downloadHref(f.id)}
-                      download={f.name}
-                      aria-label={`Download ${f.name}`}
+                      onClick={() =>
+                        canPreview(f.mime)
+                          ? setViewing(f)
+                          : window.location.assign(downloadHref(f.id))
+                      }
+                      aria-label={canPreview(f.mime) ? `View ${f.name}` : `Download ${f.name}`}
                     >
                       {f.hasThumb ? (
                         /* eslint-disable-next-line @next/next/no-img-element */
@@ -434,7 +481,7 @@ export default function FilesPage() {
                         {iconFor(f.mime, f.name)}
                       </span>
                       {f.shared && <span className="card-badge" title="Public link">🌐</span>}
-                    </a>
+                    </button>
 
                     <div className="card-body">
                       <span className="file-name" title={f.name}>
@@ -446,6 +493,17 @@ export default function FilesPage() {
                     </div>
 
                     <div className="card-actions">
+                      {canPreview(f.mime) && (
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          onClick={() => setViewing(f)}
+                          aria-label={`View ${f.name}`}
+                          title="View"
+                        >
+                          👁️
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="icon-btn"
@@ -481,7 +539,23 @@ export default function FilesPage() {
                   </li>
                 ) : (
                 <li key={f.id} className="file-row">
-                  <span className="file-icon">{iconFor(f.mime, f.name)}</span>
+                  <span className="file-thumb">
+                    {f.hasThumb ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={thumbHref(f.id, 128)}
+                        alt=""
+                        loading="lazy"
+                        onError={(e) => {
+                          e.currentTarget.replaceWith(
+                            document.createTextNode(iconFor(f.mime, f.name))
+                          );
+                        }}
+                      />
+                    ) : (
+                      iconFor(f.mime, f.name)
+                    )}
+                  </span>
                   <span className="file-info">
                     <span className="file-name">{f.name}</span>
                     <span className="file-meta">
@@ -490,6 +564,17 @@ export default function FilesPage() {
                       {f.shared ? ' · 🌐 public link' : ''}
                     </span>
                   </span>
+                  {canPreview(f.mime) && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => setViewing(f)}
+                      aria-label={`View ${f.name}`}
+                      title="View"
+                    >
+                      👁️
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="icon-btn"
@@ -521,8 +606,59 @@ export default function FilesPage() {
               )}
             </ul>
           )}
-        </main>
+
+        {viewing && (
+          <div
+            className="viewer"
+            role="dialog"
+            aria-modal="true"
+            aria-label={viewing.name}
+            onClick={() => setViewing(null)}
+          >
+            <div className="viewer-bar" onClick={(e) => e.stopPropagation()}>
+              <span className="viewer-name" title={viewing.name}>
+                {viewing.name}
+              </span>
+              <span className="viewer-meta">{formatSize(viewing.size)}</span>
+              <a
+                className="icon-btn"
+                href={downloadHref(viewing.id)}
+                download={viewing.name}
+                aria-label="Download"
+                title="Download"
+              >
+                ⬇️
+              </a>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setViewing(null)}
+                aria-label="Close viewer"
+                title="Close (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Stop clicks on the media itself from closing the viewer. */}
+            <div className="viewer-stage" onClick={(e) => e.stopPropagation()}>
+              {viewing.mime.startsWith('image/') && (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img src={viewHref(viewing.id)} alt={viewing.name} />
+              )}
+              {viewing.mime.startsWith('video/') && (
+                <video src={viewHref(viewing.id)} controls autoPlay />
+              )}
+              {viewing.mime.startsWith('audio/') && (
+                <audio src={viewHref(viewing.id)} controls autoPlay />
+              )}
+              {viewing.mime === 'application/pdf' && (
+                <iframe src={viewHref(viewing.id)} title={viewing.name} />
+              )}
+            </div>
+          </div>
+        )}
       </div>
-    </>
+    </Shell>
   );
 }

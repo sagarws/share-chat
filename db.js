@@ -6,6 +6,10 @@ const Database = require('better-sqlite3');
 // Session lifetime is echoed to the client via /api/login response.
 const SESSION_MS = 30 * 60 * 1000;
 
+// "Lifetime" sessions, requested by edit-mode clients. Ten years rather than
+// Infinity so the value stays a real number everywhere it is compared.
+const PERSIST_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+
 // Resolve the DB path. Default lives under ./data so it's easy to gitignore.
 // On Render, mount a Persistent Disk at /var/data and set DB_PATH=/var/data/app.db.
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db');
@@ -106,30 +110,50 @@ const safeEqual = (a, b) => {
   return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
 };
 
-// Token format: "<issuedAt>.<hex-hmac>". The signature covers the timestamp,
-// so tampering with the timestamp invalidates the token.
-const signToken = (issuedAt = Date.now()) => {
-  const sig = crypto
-    .createHmac('sha256', getSecret())
-    .update(String(issuedAt))
-    .digest('hex');
-  return { token: `${issuedAt}.${sig}`, expiresAt: issuedAt + SESSION_MS };
+// Token format: "<issuedAt>.<ttl>.<hex-hmac>". The signature covers both the
+// timestamp and the lifetime, so a client cannot extend its own session by
+// editing either one.
+//
+// Two-part tokens ("<issuedAt>.<hex-hmac>") are the older format and are still
+// accepted at the default lifetime, so an existing session is not invalidated
+// by this change.
+const signToken = (issuedAt = Date.now(), ttl = SESSION_MS) => {
+  const payload = `${issuedAt}.${ttl}`;
+  const sig = crypto.createHmac('sha256', getSecret()).update(payload).digest('hex');
+  return { token: `${payload}.${sig}`, expiresAt: issuedAt + ttl };
 };
 
 const verifyToken = (token) => {
-  if (typeof token !== 'string' || !token.includes('.')) return null;
-  const dot = token.indexOf('.');
-  const issuedAt = Number(token.slice(0, dot));
-  const sig = token.slice(dot + 1);
-  if (!Number.isFinite(issuedAt) || !sig) return null;
+  if (typeof token !== 'string') return null;
+  const parts = token.split('.');
 
-  const expected = crypto
-    .createHmac('sha256', getSecret())
-    .update(String(issuedAt))
-    .digest('hex');
+  let payload;
+  let sig;
+  let issuedAt;
+  let ttl;
+
+  if (parts.length === 3) {
+    [, , sig] = parts;
+    payload = `${parts[0]}.${parts[1]}`;
+    issuedAt = Number(parts[0]);
+    ttl = Number(parts[1]);
+  } else if (parts.length === 2) {
+    [, sig] = parts;
+    payload = parts[0];
+    issuedAt = Number(parts[0]);
+    ttl = SESSION_MS;
+  } else {
+    return null;
+  }
+
+  if (!sig || !Number.isFinite(issuedAt) || !Number.isFinite(ttl) || ttl <= 0) {
+    return null;
+  }
+
+  const expected = crypto.createHmac('sha256', getSecret()).update(payload).digest('hex');
   if (!safeEqual(sig, expected)) return null;
-  if (Date.now() - issuedAt > SESSION_MS) return null;
-  return { issuedAt, expiresAt: issuedAt + SESSION_MS };
+  if (Date.now() - issuedAt > ttl) return null;
+  return { issuedAt, expiresAt: issuedAt + ttl };
 };
 
 // Where uploads land in Drive. Normally GOOGLE_DRIVE_FOLDER_ID, but if that
@@ -140,6 +164,7 @@ const setDriveFolder = (id) => setSetting('drive_folder_id', id);
 
 module.exports = {
   SESSION_MS,
+  PERSIST_MS,
   getDriveFolder,
   setDriveFolder,
   getPassword,

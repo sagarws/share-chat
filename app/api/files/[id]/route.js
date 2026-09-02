@@ -16,9 +16,12 @@ const readToken = (req) => {
 };
 
 // RFC 5987 so non-ASCII filenames survive the Content-Disposition header.
-const contentDisposition = (name) => {
+// `inline` is what lets the in-app viewer render a PDF or video in place —
+// with "attachment" the browser downloads it instead of displaying it.
+const contentDisposition = (name, inline) => {
   const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'");
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  const kind = inline ? 'inline' : 'attachment';
+  return `${kind}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 };
 
 // params.id is the Drive file id — there is no local row to look up. Access is
@@ -35,10 +38,11 @@ export async function GET(req, { params }) {
       return NextResponse.json({ ok: false, error: 'File not found.' }, { status: 404 });
     }
 
+    const inline = new URL(req.url).searchParams.has('inline');
     const upstream = await downloadFile(params.id);
     const headers = {
       'Content-Type': meta.mime,
-      'Content-Disposition': contentDisposition(meta.name),
+      'Content-Disposition': contentDisposition(meta.name, inline),
       'Cache-Control': 'private, max-age=0, no-store',
     };
     if (meta.size > 0) headers['Content-Length'] = String(meta.size);
