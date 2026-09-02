@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { verifyToken } from '../../../../db';
-import { getFileMeta, downloadFile, deleteFile } from '../../../../drive';
+import { getFileMeta, downloadFile, deleteFile, updateDescription } from '../../../../drive';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -51,6 +51,34 @@ export async function GET(req, { params }) {
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err?.message || 'Download failed.' },
+      { status: 502 }
+    );
+  }
+}
+
+// Edit the Drive description of an existing file.
+export async function PATCH(req, { params }) {
+  if (!verifyToken(readToken(req))) {
+    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
+  }
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ ok: false, error: 'Invalid JSON.' }, { status: 400 });
+  }
+  const description =
+    typeof body?.description === 'string' ? body.description.trim().slice(0, 500) : '';
+
+  try {
+    const saved = await updateDescription(params.id, description);
+    if (saved === null) {
+      return NextResponse.json({ ok: false, error: 'File not found.' }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, description: saved });
+  } catch (err) {
+    return NextResponse.json(
+      { ok: false, error: err?.message || 'Could not save the description.' },
       { status: 502 }
     );
   }

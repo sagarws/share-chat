@@ -64,6 +64,10 @@ export default function FilesPage() {
   const [copied, setCopied] = useState('');
   const [copying, setCopying] = useState('');
   const [viewing, setViewing] = useState(null);
+  const [descDraft, setDescDraft] = useState('');
+  const [editing, setEditing] = useState(null);
+  const [editText, setEditText] = useState('');
+  const [savingDesc, setSavingDesc] = useState(false);
   const [folders, setFolders] = useState([]);
   const [folderId, setFolderId] = useState('');
   const [tree, setTree] = useState([]);
@@ -250,6 +254,8 @@ export default function FilesPage() {
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
     xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
     if (folderId) xhr.setRequestHeader('X-Folder', encodeURIComponent(folderId));
+    const note = descDraft.trim();
+    if (note) xhr.setRequestHeader('X-Description', encodeURIComponent(note));
     // Name the uploader if they already joined the chat in this browser.
     const who = window.sessionStorage.getItem('chat-username') || '';
     if (who) xhr.setRequestHeader('X-Uploader', encodeURIComponent(who));
@@ -271,6 +277,7 @@ export default function FilesPage() {
       if (xhr.status === 401) return logout();
       if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
         setFiles((prev) => [data.file, ...prev]);
+        setDescDraft('');
       } else {
         setError(data.error || `Upload failed (${xhr.status}).`);
       }
@@ -438,6 +445,39 @@ export default function FilesPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [viewing]);
+
+  const openEditor = (row) => {
+    setEditing(row);
+    setEditText(row.description || '');
+  };
+
+  const saveDescription = async (e) => {
+    e.preventDefault();
+    if (!editing || savingDesc) return;
+    setSavingDesc(true);
+    try {
+      const res = await fetch(`/api/files/${editing.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({ description: editText }),
+      });
+      if (res.status === 401) return logout();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save.');
+      setFiles((prev) =>
+        prev.map((f) => (f.id === editing.id ? { ...f, description: data.description } : f))
+      );
+      setEditing(null);
+      setError('');
+    } catch (err) {
+      setError(err?.message || 'Could not save the description.');
+    } finally {
+      setSavingDesc(false);
+    }
+  };
 
   const handleDelete = async (row) => {
     if (deleting) return;
@@ -648,6 +688,15 @@ export default function FilesPage() {
             </div>
           )}
 
+          <input
+            className="desc-field"
+            placeholder="Description for the next upload (optional) — shows in Google Drive"
+            value={descDraft}
+            onChange={(e) => setDescDraft(e.target.value)}
+            maxLength={500}
+            disabled={Boolean(upload) || !folderId}
+          />
+
           <button
             type="button"
             className="drop-zone"
@@ -747,9 +796,23 @@ export default function FilesPage() {
                       <span className="file-meta">
                         {formatSize(f.size)} · {formatWhen(f.createdAt)}
                       </span>
+                      {f.description && (
+                        <span className="file-desc" title={f.description}>
+                          {f.description}
+                        </span>
+                      )}
                     </div>
 
                     <div className="card-actions">
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        onClick={() => openEditor(f)}
+                        aria-label={`Edit description of ${f.name}`}
+                        title="Edit description"
+                      >
+                        📝
+                      </button>
                       {canPreview(f.mime) && (
                         <button
                           type="button"
@@ -820,7 +883,21 @@ export default function FilesPage() {
                       {f.uploader ? ` · ${f.uploader}` : ''} · {formatWhen(f.createdAt)}
                       {f.shared ? ' · 🌐 public link' : ''}
                     </span>
+                    {f.description && (
+                      <span className="file-desc" title={f.description}>
+                        {f.description}
+                      </span>
+                    )}
                   </span>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => openEditor(f)}
+                    aria-label={`Edit description of ${f.name}`}
+                    title="Edit description"
+                  >
+                    📝
+                  </button>
                   {canPreview(f.mime) && (
                     <button
                       type="button"
@@ -865,6 +942,35 @@ export default function FilesPage() {
           )}
         </div>
       </div>
+
+      {editing && (
+        <div className="dialog" role="dialog" aria-modal="true" onClick={() => setEditing(null)}>
+          <form
+            className="dialog-card"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={saveDescription}
+          >
+            <h2>Description</h2>
+            <p className="muted dialog-sub">{editing.name}</p>
+            <textarea
+              autoFocus
+              rows={4}
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              maxLength={500}
+              placeholder="Visible in Google Drive's file details"
+            />
+            <div className="dialog-actions">
+              <button type="button" className="ghost" onClick={() => setEditing(null)}>
+                Cancel
+              </button>
+              <button type="submit" disabled={savingDesc}>
+                {savingDesc ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {viewing && (
           <div

@@ -88,6 +88,8 @@ export async function POST(req) {
   const mime =
     (req.headers.get('x-file-type') || '').slice(0, 100) || 'application/octet-stream';
   const uploader = decode(req.headers.get('x-uploader')).trim().slice(0, 30);
+  // Written to the Drive file's description, so it is visible in Drive too.
+  const description = decode(req.headers.get('x-description')).trim().slice(0, 500);
 
   // Upload into the folder the client has selected, falling back to the
   // remembered default. Any folder in the tree is valid, including a
@@ -117,10 +119,18 @@ export async function POST(req) {
   }
 
   try {
-    const driveId = await uploadFile({ name, mime, size, uploader, folderId, body: req.body });
+    const driveId = await uploadFile({
+      name,
+      mime,
+      size,
+      uploader,
+      description,
+      folderId,
+      body: req.body,
+    });
     return NextResponse.json({
       ok: true,
-      file: { id: driveId, name, mime, size, uploader, createdAt: Date.now() },
+      file: { id: driveId, name, mime, size, uploader, description, createdAt: Date.now() },
     });
   } catch (err) {
     return NextResponse.json(

@@ -91,7 +91,7 @@ const authHeaders = async () => ({ Authorization: `Bearer ${await getAccessToken
  * @param {string}  opts.folderId      destination Drive folder
  * @param {ReadableStream|Buffer} opts.body
  */
-const uploadFile = async ({ name, mime, size, uploader, folderId, body }) => {
+const uploadFile = async ({ name, mime, size, uploader, description, folderId, body }) => {
   if (!folderId) throw new Error('No destination folder selected.');
 
   const initRes = await fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
@@ -106,6 +106,9 @@ const uploadFile = async ({ name, mime, size, uploader, folderId, body }) => {
     body: JSON.stringify({
       name,
       parents: [folderId],
+      // Drive shows this in the file's details panel, so it is visible from
+      // Drive itself and not only inside this app.
+      ...(description ? { description } : {}),
       // appProperties are private to this OAuth client, so the uploader's
       // name rides along with the file instead of living in a local table
       // that a redeploy would wipe.
@@ -151,7 +154,7 @@ const uploadFile = async ({ name, mime, size, uploader, folderId, body }) => {
 };
 
 const FILE_FIELDS =
-  'id,name,mimeType,size,createdTime,appProperties,webViewLink,shared,thumbnailLink';
+  'id,name,mimeType,size,createdTime,description,appProperties,webViewLink,shared,thumbnailLink';
 
 /**
  * List the files this app created inside `folderId`, newest first.
@@ -201,6 +204,7 @@ const listDriveFiles = async (folderId) => {
         mime: f.mimeType || 'application/octet-stream',
         size: Number(f.size) || 0,
         uploader: f.appProperties?.uploader || '',
+        description: f.description || '',
         createdAt: Date.parse(f.createdTime) || 0,
         link: f.webViewLink || '',
         shared: Boolean(f.shared),
@@ -319,6 +323,7 @@ const getFileMeta = async (fileId) => {
     mime: data.mimeType || 'application/octet-stream',
     size: Number(data.size) || 0,
     uploader: data.appProperties?.uploader || '',
+    description: data.description || '',
     createdAt: Date.parse(data.createdTime) || 0,
     link: data.webViewLink || '',
     shared: Boolean(data.shared),
@@ -398,6 +403,26 @@ const shareFile = async (fileId) => {
   return link;
 };
 
+/** Set or clear a file's Drive description. Returns the stored value. */
+const updateDescription = async (fileId, description) => {
+  const res = await fetch(
+    `${FILES_API}/${encodeURIComponent(fileId)}?fields=description&supportsAllDrives=true`,
+    {
+      ...NO_CACHE,
+      method: 'PATCH',
+      headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+      // An empty string clears it; Drive rejects null here.
+      body: JSON.stringify({ description: description || '' }),
+    }
+  );
+  if (res.status === 404) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Could not save the description (${res.status}).`);
+  }
+  return data.description || '';
+};
+
 /** Delete a Drive file. A 404 counts as success — it's already gone. */
 const deleteFile = async (fileId) => {
   const res = await fetch(
@@ -419,6 +444,7 @@ module.exports = {
   buildFolderTree,
   getFileMeta,
   shareFile,
+  updateDescription,
   getThumbnail,
   downloadFile,
   deleteFile,
