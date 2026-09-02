@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { verifyToken } from '../../../db';
+import { verifyToken, getSelectedFolder, getFolder } from '../../../db';
 import { isConfigured, uploadFile, listDriveFiles } from '../../../drive';
 
 export const runtime = 'nodejs';
@@ -33,15 +33,21 @@ export async function GET(req) {
       ok: true,
       configured: false,
       maxBytes: MAX_UPLOAD_BYTES,
+      folderId: '',
       files: [],
     });
   }
   try {
+    // ?folder=<id> scopes the listing; without it, the remembered default.
+    const asked = new URL(req.url).searchParams.get('folder');
+    const folderId = asked || getSelectedFolder();
+
     return NextResponse.json({
       ok: true,
       configured: true,
       maxBytes: MAX_UPLOAD_BYTES,
-      files: await listDriveFiles(),
+      folderId,
+      files: folderId ? await listDriveFiles(folderId) : [],
     });
   } catch (err) {
     return NextResponse.json(
@@ -83,6 +89,17 @@ export async function POST(req) {
     (req.headers.get('x-file-type') || '').slice(0, 100) || 'application/octet-stream';
   const uploader = decode(req.headers.get('x-uploader')).trim().slice(0, 30);
 
+  // Upload into the folder the client has selected, falling back to the
+  // remembered default. Only registered folders are accepted.
+  const asked = decode(req.headers.get('x-folder')).trim();
+  const folderId = asked && getFolder(asked) ? asked : getSelectedFolder();
+  if (!folderId) {
+    return NextResponse.json(
+      { ok: false, error: 'No Drive folder configured. Add one first.' },
+      { status: 400 }
+    );
+  }
+
   // Content-Length is set by the browser and is what Drive must agree with.
   const size = Number(req.headers.get('content-length'));
   if (!Number.isFinite(size) || size <= 0) {
@@ -99,7 +116,7 @@ export async function POST(req) {
   }
 
   try {
-    const driveId = await uploadFile({ name, mime, size, uploader, body: req.body });
+    const driveId = await uploadFile({ name, mime, size, uploader, folderId, body: req.body });
     return NextResponse.json({
       ok: true,
       file: { id: driveId, name, mime, size, uploader, createdAt: Date.now() },

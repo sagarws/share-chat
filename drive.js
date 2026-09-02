@@ -7,8 +7,6 @@
 // Scope is drive.file, so this app can only ever see files it created
 // itself — the rest of the owner's Drive is invisible to it.
 
-const { getDriveFolder, setDriveFolder } = require('./db');
-
 const FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 const TOKEN_API = 'https://oauth2.googleapis.com/token';
@@ -17,12 +15,13 @@ const config = () => ({
   clientId: process.env.GOOGLE_CLIENT_ID || '',
   clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   refreshToken: process.env.GOOGLE_REFRESH_TOKEN || '',
-  folderId: process.env.GOOGLE_DRIVE_FOLDER_ID || '',
 });
 
+// Folders come from the registry in the database now, not the environment, so
+// they are no longer part of "is Drive connected".
 const isConfigured = () => {
   const c = config();
-  return Boolean(c.clientId && c.clientSecret && c.refreshToken && c.folderId);
+  return Boolean(c.clientId && c.clientSecret && c.refreshToken);
 };
 
 // Cached access token. Google's expire in ~1h; refresh 60s early so a
@@ -73,76 +72,48 @@ const getAccessToken = async () => {
 
 const authHeaders = async () => ({ Authorization: `Bearer ${await getAccessToken()}` });
 
-const APP_FOLDER_NAME = 'share-chat-uploads';
-
-/** Create a folder in the authorising account's Drive root. */
-const createAppFolder = async () => {
-  const res = await fetch(`${FILES_API}?fields=id`, {
-    method: 'POST',
-    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: APP_FOLDER_NAME,
-      mimeType: 'application/vnd.google-apps.folder',
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.id) {
-    throw new Error(
-      `Could not create the Drive folder (${res.status}). ${JSON.stringify(data).slice(0, 200)}`
-    );
-  }
-  return data.id;
-};
-
 /**
- * Upload bytes to the configured folder using a resumable session, so the
- * request body streams through instead of being buffered in memory. Returns
- * the new Drive file id.
+ * Upload bytes to `folderId` using a resumable session, so the request body
+ * streams through instead of being buffered in memory. Returns the new Drive
+ * file id.
  *
  * @param {object}  opts
  * @param {string}  opts.name
  * @param {string}  opts.mime
  * @param {number}  opts.size          exact byte length of `body`
+ * @param {string}  opts.folderId      destination Drive folder
  * @param {ReadableStream|Buffer} opts.body
  */
-const uploadFile = async ({ name, mime, size, uploader, body }) => {
-  const startSession = async (folderId) =>
-    fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
-      method: 'POST',
-      headers: {
-        ...(await authHeaders()),
-        'Content-Type': 'application/json; charset=UTF-8',
-        'X-Upload-Content-Type': mime,
-        'X-Upload-Content-Length': String(size),
-      },
-      body: JSON.stringify({
-        name,
-        parents: [folderId],
-        // appProperties are private to this OAuth client, so the uploader's
-        // name rides along with the file instead of living in a local table
-        // that a redeploy would wipe.
-        appProperties: uploader ? { uploader } : undefined,
-      }),
-    });
+const uploadFile = async ({ name, mime, size, uploader, folderId, body }) => {
+  if (!folderId) throw new Error('No destination folder selected.');
 
-  // Prefer a folder we created earlier (see the 404 fallback below), else the
-  // one from the environment.
-  let folderId = getDriveFolder() || config().folderId;
-  let initRes = await startSession(folderId);
+  const initRes = await fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
+    method: 'POST',
+    headers: {
+      ...(await authHeaders()),
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': mime,
+      'X-Upload-Content-Length': String(size),
+    },
+    body: JSON.stringify({
+      name,
+      parents: [folderId],
+      // appProperties are private to this OAuth client, so the uploader's
+      // name rides along with the file instead of living in a local table
+      // that a redeploy would wipe.
+      appProperties: uploader ? { uploader } : undefined,
+    }),
+  });
 
-  // Under the drive.file scope Drive only acknowledges folders this app
-  // created, so a folder made by hand in the web UI can come back as
-  // "File not found: <id>". Create our own folder once and use it from then on.
   if (initRes.status === 404) {
-    folderId = await createAppFolder();
-    setDriveFolder(folderId);
-    console.warn(
-      `[drive] GOOGLE_DRIVE_FOLDER_ID was unreachable under the drive.file scope. ` +
-        `Created "${APP_FOLDER_NAME}" (${folderId}) and will upload there instead.`
+    // Under the drive.file scope Drive only acknowledges folders this app can
+    // reach. A mistyped id, or a folder belonging to a different account, lands
+    // here — say so plainly rather than silently filing the upload elsewhere.
+    throw new Error(
+      'That Drive folder could not be found. Check the folder id, and that it ' +
+        'belongs to the connected Google account.'
     );
-    initRes = await startSession(folderId);
   }
-
   if (!initRes.ok) {
     const detail = await initRes.text().catch(() => '');
     throw new Error(`Drive rejected the upload (${initRes.status}). ${detail.slice(0, 300)}`);
@@ -174,20 +145,23 @@ const FILE_FIELDS =
   'id,name,mimeType,size,createdTime,appProperties,webViewLink,shared,thumbnailLink';
 
 /**
- * List every file this app created, newest first.
+ * List the files this app created inside `folderId`, newest first.
  *
  * Under the drive.file scope Drive only ever returns files created by this
- * OAuth client, so the result set is exactly our uploads — no parent filter
- * needed, and nothing to reconcile against a local database. This is what
- * makes the listing survive a wiped disk.
+ * OAuth client, so the result set is exactly our uploads in that folder —
+ * nothing to reconcile against a local database, which is what makes the
+ * listing survive a wiped disk.
  */
-const listDriveFiles = async () => {
+const listDriveFiles = async (folderId) => {
+  if (!folderId) return [];
   const out = [];
   let pageToken = '';
 
   do {
     const params = new URLSearchParams({
-      q: "mimeType != 'application/vnd.google-apps.folder' and trashed = false",
+      q:
+        `'${folderId.replace(/'/g, "\\'")}' in parents ` +
+        "and mimeType != 'application/vnd.google-apps.folder' and trashed = false",
       fields: `nextPageToken, files(${FILE_FIELDS})`,
       orderBy: 'createdTime desc',
       pageSize: '200',
@@ -197,6 +171,14 @@ const listDriveFiles = async () => {
 
     const res = await fetch(`${FILES_API}?${params}`, { headers: await authHeaders() });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 404) {
+      // Drive answers 404 (not an empty list) for a folder this app cannot
+      // reach — a mistyped id, or one from another account.
+      throw new Error(
+        'That Drive folder could not be found. Check the folder id, and that it ' +
+          'belongs to the connected Google account.'
+      );
+    }
     if (!res.ok) {
       throw new Error(
         `Drive listing failed (${res.status}). ${JSON.stringify(data).slice(0, 300)}`

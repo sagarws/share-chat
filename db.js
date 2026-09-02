@@ -24,6 +24,10 @@ const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db'
 let db = null;
 let getStmt = null;
 let setStmt = null;
+let listFoldersStmt = null;
+let getFolderStmt = null;
+let addFolderStmt = null;
+let deleteFolderStmt = null;
 
 const getSetting = (key) => {
   init();
@@ -52,7 +56,20 @@ function init() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS folders (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
+
+  listFoldersStmt = handle.prepare('SELECT * FROM folders ORDER BY created_at ASC');
+  getFolderStmt = handle.prepare('SELECT * FROM folders WHERE id = ?');
+  addFolderStmt = handle.prepare(
+    'INSERT INTO folders (id, name, created_at) VALUES (?, ?, ?) ' +
+      'ON CONFLICT(id) DO UPDATE SET name = excluded.name'
+  );
+  deleteFolderStmt = handle.prepare('DELETE FROM folders WHERE id = ?');
 
   getStmt = handle.prepare('SELECT value FROM settings WHERE key = ?');
   setStmt = handle.prepare(
@@ -96,6 +113,41 @@ function seed() {
       }
     }
     setSetting('pwd', value || 'change-me');
+  }
+
+  seedFolders();
+}
+
+// The folder registry lives in SQLite, which a host without a persistent disk
+// wipes on redeploy. Seeding from the environment means the folders come back
+// on their own:
+//
+//   GOOGLE_DRIVE_FOLDERS=<id>|Name,<id>|Other name     (preferred)
+//   GOOGLE_DRIVE_FOLDER_ID=<id>                        (single, legacy)
+//
+// Only runs when the table is empty, so folders added through the UI are never
+// overwritten.
+function seedFolders() {
+  if (listFoldersStmt.all().length) return;
+
+  const now = Date.now();
+  const multi = (process.env.GOOGLE_DRIVE_FOLDERS || '').trim();
+  if (multi) {
+    let order = 0;
+    for (const entry of multi.split(',')) {
+      const [id, ...rest] = entry.split('|');
+      const folderId = (id || '').trim();
+      if (!folderId) continue;
+      const name = rest.join('|').trim() || `Folder ${order + 1}`;
+      addFolderStmt.run(folderId, name, now + order);
+      order += 1;
+    }
+    if (listFoldersStmt.all().length) return;
+  }
+
+  const single = (process.env.GOOGLE_DRIVE_FOLDER_ID || '').trim();
+  if (single) {
+    addFolderStmt.run(single, process.env.GOOGLE_DRIVE_FOLDER_NAME || 'Shared files', now);
   }
 }
 
@@ -156,17 +208,56 @@ const verifyToken = (token) => {
   return { issuedAt, expiresAt: issuedAt + ttl };
 };
 
-// Where uploads land in Drive. Normally GOOGLE_DRIVE_FOLDER_ID, but if that
-// folder is unreachable under the drive.file scope the app creates its own and
-// remembers the id here.
-const getDriveFolder = () => getSetting('drive_folder_id');
-const setDriveFolder = (id) => setSetting('drive_folder_id', id);
+// --- Drive folders ----------------------------------------------------------
+
+const listFolders = () => {
+  init();
+  return listFoldersStmt.all().map((f) => ({ id: f.id, name: f.name, createdAt: f.created_at }));
+};
+
+const getFolder = (id) => {
+  init();
+  return getFolderStmt.get(id) ?? null;
+};
+
+const addFolder = (id, name) => {
+  init();
+  addFolderStmt.run(id, name, Date.now());
+};
+
+const removeFolder = (id) => {
+  init();
+  const gone = deleteFolderStmt.run(id).changes > 0;
+  // Never leave the selection pointing at a folder that is no longer listed.
+  if (gone && getSetting('selected_folder') === id) setSetting('selected_folder', '');
+  return gone;
+};
+
+// Which folder new uploads go to, remembered across sessions. Falls back to the
+// first registered folder when unset or pointing somewhere that no longer
+// exists.
+const getSelectedFolder = () => {
+  const saved = getSetting('selected_folder');
+  if (saved && getFolderStmt.get(saved)) return saved;
+  return listFolders()[0]?.id || '';
+};
+
+const setSelectedFolder = (id) => {
+  init();
+  if (!getFolderStmt.get(id)) return false;
+  setSetting('selected_folder', id);
+  return true;
+};
 
 module.exports = {
   SESSION_MS,
   PERSIST_MS,
-  getDriveFolder,
-  setDriveFolder,
+  listFolders,
+  getFolder,
+  addFolder,
+  removeFolder,
+  getSelectedFolder,
+  setSelectedFolder,
   getPassword,
   setPassword,
   signToken,

@@ -1249,3 +1249,112 @@ button.card-preview {
   font: inherit;
   color: inherit;
 }
+
+/* --- drive folder tabs ---------------------------------------------------- */
+
+.folder-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.folder-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.folder-tab {
+  display: inline-flex;
+  align-items: stretch;
+  background: #1c2030;
+  border: 1px solid #2a2f3e;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.folder-tab > button {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: #b9c0d0;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 4px 6px 13px;
+  cursor: pointer;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-tab .folder-x {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: #667085;
+  font-size: 10px;
+  padding: 0 10px 0 6px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.folder-tab .folder-x:hover {
+  color: #f87171;
+}
+
+.folder-tab:hover {
+  border-color: #3a4260;
+}
+
+.folder-tab.active {
+  background: #4b6bff;
+  border-color: transparent;
+}
+
+.folder-tab.active > button {
+  color: #fff;
+}
+
+.folder-tab.active .folder-x {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.folder-tab.active .folder-x:hover {
+  color: #fff;
+}
+
+.folder-add {
+  background: transparent;
+  border: 1px dashed #2a2f3e;
+  color: #8a93a6;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.folder-add:hover {
+  border-color: #4b6bff;
+  color: #b9c0d0;
+}
+
+.folder-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.folder-form input {
+  flex: 1;
+  min-width: 160px;
+  background: #0f1218;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.folder-form button {
+  padding: 8px 16px;
+  font-size: 13px;
+}

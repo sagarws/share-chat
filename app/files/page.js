@@ -63,6 +63,10 @@ export default function FilesPage() {
   const [copied, setCopied] = useState('');
   const [copying, setCopying] = useState('');
   const [viewing, setViewing] = useState(null);
+  const [folders, setFolders] = useState([]);
+  const [folderId, setFolderId] = useState('');
+  const [addingFolder, setAddingFolder] = useState(false);
+  const [newFolder, setNewFolder] = useState({ name: '', id: '' });
   const [view, setView] = useState('list');
 
   const inputRef = useRef(null);
@@ -73,23 +77,55 @@ export default function FilesPage() {
     router.replace('/');
   }, [router]);
 
+  // Fetch one folder's files. Passing an explicit id avoids waiting for the
+  // folder state to settle after a switch.
+  const loadFiles = useCallback(
+    async (id) => {
+      const target = id === undefined ? folderId : id;
+      if (!target) {
+        setFiles([]);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/files?folder=${encodeURIComponent(target)}`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        });
+        if (res.status === 401) return logout();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load files.');
+        setFiles(data.files || []);
+        setConfigured(data.configured !== false);
+        if (Number(data.maxBytes) > 0) setMaxBytes(Number(data.maxBytes));
+        setError('');
+      } catch (err) {
+        setFiles([]);
+        setError(err?.message || 'Could not load files.');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [folderId, logout]
+  );
+
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/files', {
+      const res = await fetch('/api/folders', {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
       if (res.status === 401) return logout();
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load files.');
-      setFiles(data.files || []);
-      setConfigured(data.configured !== false);
-      if (Number(data.maxBytes) > 0) setMaxBytes(Number(data.maxBytes));
-      setError('');
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load folders.');
+      setFolders(data.folders || []);
+      setFolderId(data.selected || '');
+      await loadFiles(data.selected || '');
     } catch (err) {
-      setError(err?.message || 'Could not load files.');
-    } finally {
+      setError(err?.message || 'Could not load folders.');
       setLoading(false);
     }
+    // loadFiles is recreated per render but only reads what we pass it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logout]);
 
   // Gate the page on the same token the chat uses, then fetch the list.
@@ -175,6 +211,7 @@ export default function FilesPage() {
     xhr.setRequestHeader('Authorization', `Bearer ${getToken()}`);
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
     xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
+    if (folderId) xhr.setRequestHeader('X-Folder', encodeURIComponent(folderId));
     // Name the uploader if they already joined the chat in this browser.
     const who = window.sessionStorage.getItem('chat-username') || '';
     if (who) xhr.setRequestHeader('X-Uploader', encodeURIComponent(who));
@@ -213,6 +250,73 @@ export default function FilesPage() {
     };
 
     xhr.send(file);
+  };
+
+  // Switching folders also stores the choice server-side, so it is the default
+  // the next time anyone opens the page.
+  const chooseFolder = async (id) => {
+    if (id === folderId) return;
+    setFolderId(id);
+    setViewing(null);
+    loadFiles(id);
+    try {
+      await fetch('/api/folders', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({ selected: id }),
+      });
+    } catch {
+      // the switch still works for this session; only the default is lost
+    }
+  };
+
+  const handleAddFolder = async (e) => {
+    e.preventDefault();
+    const name = newFolder.name.trim();
+    const id = newFolder.id.trim();
+    if (!name || !id) return;
+    try {
+      const res = await fetch('/api/folders', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({ name, id }),
+      });
+      if (res.status === 401) return logout();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not add folder.');
+      setFolders(data.folders || []);
+      setNewFolder({ name: '', id: '' });
+      setAddingFolder(false);
+      setError('');
+      const added = (data.folders || []).find((f) => f.name === name);
+      if (added) chooseFolder(added.id);
+    } catch (err) {
+      setError(err?.message || 'Could not add folder.');
+    }
+  };
+
+  const handleRemoveFolder = async (folder) => {
+    if (!window.confirm(`Remove "${folder.name}" from the list?\n\nThe folder and its files stay in Google Drive.`)) return;
+    try {
+      const res = await fetch(`/api/folders/${encodeURIComponent(folder.id)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (res.status === 401) return logout();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not remove folder.');
+      setFolders(data.folders || []);
+      setFolderId(data.selected || '');
+      loadFiles(data.selected || '');
+    } catch (err) {
+      setError(err?.message || 'Could not remove folder.');
+    }
   };
 
   const chooseView = (next) => {
@@ -395,11 +499,69 @@ export default function FilesPage() {
             </div>
           )}
 
+          <div className="folder-bar">
+            <div className="folder-tabs" role="tablist" aria-label="Drive folders">
+              {folders.map((f) => (
+                <span
+                  key={f.id}
+                  className={`folder-tab${f.id === folderId ? ' active' : ''}`}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={f.id === folderId}
+                    onClick={() => chooseFolder(f.id)}
+                    title={f.name}
+                  >
+                    {f.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="folder-x"
+                    onClick={() => handleRemoveFolder(f)}
+                    aria-label={`Remove ${f.name} from the list`}
+                    title="Remove from list (keeps the Drive folder)"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+              <button
+                type="button"
+                className="folder-add"
+                onClick={() => setAddingFolder((v) => !v)}
+                aria-expanded={addingFolder}
+              >
+                {addingFolder ? 'Cancel' : '+ Add folder'}
+              </button>
+            </div>
+
+            {addingFolder && (
+              <form className="folder-form" onSubmit={handleAddFolder}>
+                <input
+                  autoFocus
+                  placeholder="Name (e.g. Invoices)"
+                  value={newFolder.name}
+                  onChange={(e) => setNewFolder((v) => ({ ...v, name: e.target.value }))}
+                  maxLength={60}
+                />
+                <input
+                  placeholder="Drive folder id or URL"
+                  value={newFolder.id}
+                  onChange={(e) => setNewFolder((v) => ({ ...v, id: e.target.value }))}
+                />
+                <button type="submit" disabled={!newFolder.name.trim() || !newFolder.id.trim()}>
+                  Add
+                </button>
+              </form>
+            )}
+          </div>
+
           <button
             type="button"
             className="drop-zone"
             onClick={() => inputRef.current?.click()}
-            disabled={Boolean(upload)}
+            disabled={Boolean(upload) || !folderId}
           >
             <span className="drop-icon">⬆️</span>
             <span className="drop-title">
@@ -441,8 +603,12 @@ export default function FilesPage() {
 
           {loading ? (
             <div className="empty muted">Loading…</div>
+          ) : folders.length === 0 ? (
+            <div className="empty muted">
+              No Drive folders yet. Add one above to start uploading.
+            </div>
           ) : files.length === 0 ? (
-            <div className="empty muted">No files shared yet.</div>
+            <div className="empty muted">Nothing in this folder yet.</div>
           ) : (
             <ul className={view === 'grid' ? 'file-grid' : 'file-list'}>
               {files.map((f) =>
