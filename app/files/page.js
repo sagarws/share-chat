@@ -6,6 +6,7 @@ import Shell from '../Shell';
 import FolderTree from '../FolderTree';
 import { clearAuth, isAuthValid, getToken } from '../auth';
 import { fileFromPaste } from '../clipboard';
+import { addCaption, isImage } from '../imageCaption';
 
 // Fallback only — the real cap comes from GET /api/files, which reads
 // MAX_UPLOAD_BYTES on the server. Keeping them in sync avoids a client-side
@@ -68,6 +69,11 @@ export default function FilesPage() {
   const [editing, setEditing] = useState(null);
   const [editText, setEditText] = useState('');
   const [savingDesc, setSavingDesc] = useState(false);
+  // An image waiting on the "add a description?" question.
+  const [pending, setPending] = useState(null);
+  const [pendingText, setPendingText] = useState('');
+  const [stampCaption, setStampCaption] = useState(true);
+  const [preparing, setPreparing] = useState(false);
   const [folders, setFolders] = useState([]);
   const [folderId, setFolderId] = useState('');
   const [tree, setTree] = useState([]);
@@ -232,8 +238,18 @@ export default function FilesPage() {
   }, [ready, logout]);
 
   // XHR rather than fetch: it's the only way to get upload progress events.
-  const startUpload = (file) => {
+  const startUpload = (file, options = {}) => {
     if (!file || upload) return;
+
+    // Images get the chance to carry a description — both into Drive's
+    // metadata and, optionally, printed under the image itself.
+    if (isImage(file) && !options.answered) {
+      setPending(file);
+      setPendingText(descDraft.trim());
+      setStampCaption(true);
+      return;
+    }
+
     if (file.size === 0) {
       setError('That file is empty.');
       return;
@@ -254,7 +270,7 @@ export default function FilesPage() {
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
     xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
     if (folderId) xhr.setRequestHeader('X-Folder', encodeURIComponent(folderId));
-    const note = descDraft.trim();
+    const note = (options.description ?? descDraft).trim();
     if (note) xhr.setRequestHeader('X-Description', encodeURIComponent(note));
     // Name the uploader if they already joined the chat in this browser.
     const who = window.sessionStorage.getItem('chat-username') || '';
@@ -445,6 +461,36 @@ export default function FilesPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [viewing]);
+
+  // "Skip" uploads the original untouched; confirming stores the text as the
+  // Drive description and, when asked, renders it under the image first.
+  const confirmPending = async (withDescription) => {
+    const file = pending;
+    if (!file || preparing) return;
+    const text = withDescription ? pendingText.trim() : '';
+
+    setPreparing(true);
+    try {
+      let toUpload = file;
+      if (text && stampCaption) {
+        toUpload = await addCaption(file, text);
+        if (toUpload.size > maxBytes) {
+          setError(
+            `With the caption added the image is ${formatSize(toUpload.size)}, over the ` +
+              `${formatSize(maxBytes)} limit. Uncheck the caption or shorten the text.`
+          );
+          return;
+        }
+      }
+      setPending(null);
+      setPendingText('');
+      startUpload(toUpload, { answered: true, description: text });
+    } catch (err) {
+      setError(err?.message || 'Could not prepare the image.');
+    } finally {
+      setPreparing(false);
+    }
+  };
 
   const openEditor = (row) => {
     setEditing(row);
@@ -942,6 +988,54 @@ export default function FilesPage() {
           )}
         </div>
       </div>
+
+      {pending && (
+        <div className="dialog" role="dialog" aria-modal="true">
+          <div className="dialog-card">
+            <h2>Add a description?</h2>
+            <p className="muted dialog-sub">{pending.name}</p>
+            <textarea
+              autoFocus
+              rows={3}
+              value={pendingText}
+              onChange={(e) => setPendingText(e.target.value)}
+              maxLength={500}
+              placeholder="Describe this image…"
+              disabled={preparing}
+            />
+            <label className="dialog-check">
+              <input
+                type="checkbox"
+                checked={stampCaption}
+                onChange={(e) => setStampCaption(e.target.checked)}
+                disabled={preparing}
+              />
+              <span>Print it under the image as a caption</span>
+            </label>
+            <p className="dialog-note">
+              The description is saved to Google Drive either way. With the box
+              ticked, the uploaded image also carries the text in a band below it.
+            </p>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => confirmPending(false)}
+                disabled={preparing}
+              >
+                No, upload as is
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmPending(true)}
+                disabled={preparing || !pendingText.trim()}
+              >
+                {preparing ? 'Preparing…' : 'Add description'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editing && (
         <div className="dialog" role="dialog" aria-modal="true" onClick={() => setEditing(null)}>
