@@ -236,16 +236,18 @@ const removeFolder = (id) => {
 // Which folder new uploads go to, remembered across sessions. Falls back to the
 // first registered folder when unset or pointing somewhere that no longer
 // exists.
+// The selection can be any folder in the tree, including a subfolder, so it is
+// not validated against the roots table — only non-empty.
 const getSelectedFolder = () => {
   const saved = getSetting('selected_folder');
-  if (saved && getFolderStmt.get(saved)) return saved;
+  if (saved) return saved;
   return listFolders()[0]?.id || '';
 };
 
 const setSelectedFolder = (id) => {
   init();
-  if (!getFolderStmt.get(id)) return false;
-  setSetting('selected_folder', id);
+  if (!id) return false;
+  setSetting('selected_folder', String(id).trim());
   return true;
 };
 

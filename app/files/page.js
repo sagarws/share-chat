@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Shell from '../Shell';
+import FolderTree from '../FolderTree';
 import { clearAuth, isAuthValid, getToken } from '../auth';
 import { fileFromPaste } from '../clipboard';
 
@@ -65,6 +66,7 @@ export default function FilesPage() {
   const [viewing, setViewing] = useState(null);
   const [folders, setFolders] = useState([]);
   const [folderId, setFolderId] = useState('');
+  const [tree, setTree] = useState([]);
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolder, setNewFolder] = useState({ name: '', id: '' });
   const [view, setView] = useState('list');
@@ -109,6 +111,41 @@ export default function FilesPage() {
     [folderId, logout]
   );
 
+  // The tree is built server-side by walking Drive; this only fetches it.
+  // Fetch the server-built tree.
+  //
+  // `expectId` guards against Drive's folder index lagging behind creation: a
+  // response that does not yet contain a folder we know exists would wipe it
+  // from the UI, so hold the current tree and retry instead of applying it.
+  const loadTree = useCallback(
+    async (refresh, expectId, attempt = 0) => {
+      try {
+        const res = await fetch(`/api/folders/tree${refresh ? '?refresh=1' : ''}`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        });
+        if (res.status === 401) return logout();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) return;
+
+        if (expectId) {
+          const has = (nodes) =>
+            nodes.some((n) => n.id === expectId || has(n.children || []));
+          if (!has(data.tree || [])) {
+            // Give Drive a moment, then look again — up to ~30s.
+            if (attempt < 5) {
+              setTimeout(() => loadTree(true, expectId, attempt + 1), 5000);
+            }
+            return;
+          }
+        }
+        setTree(data.tree || []);
+      } catch {
+        // a missing tree only costs the panel; the file list still works
+      }
+    },
+    [logout]
+  );
+
   const load = useCallback(async () => {
     try {
       const res = await fetch('/api/folders', {
@@ -119,12 +156,13 @@ export default function FilesPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load folders.');
       setFolders(data.folders || []);
       setFolderId(data.selected || '');
+      loadTree();
       await loadFiles(data.selected || '');
     } catch (err) {
       setError(err?.message || 'Could not load folders.');
       setLoading(false);
     }
-    // loadFiles is recreated per render but only reads what we pass it.
+    // loadFiles/loadTree are recreated per render but only read what we pass.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logout]);
 
@@ -296,6 +334,7 @@ export default function FilesPage() {
       setError('');
       const added = (data.folders || []).find((f) => f.name === name);
       if (added) chooseFolder(added.id);
+      loadTree(true);
     } catch (err) {
       setError(err?.message || 'Could not add folder.');
     }
@@ -314,8 +353,46 @@ export default function FilesPage() {
       setFolders(data.folders || []);
       setFolderId(data.selected || '');
       loadFiles(data.selected || '');
+      loadTree(true);
     } catch (err) {
       setError(err?.message || 'Could not remove folder.');
+    }
+  };
+
+  // Create a real subfolder in Drive. Folders made this way are app-created, so
+  // the drive.file scope can see them and they show up in the tree.
+  const handleAddSubfolder = async (parent, rawName) => {
+    const name = (rawName || '').trim();
+    if (!name) return;
+    try {
+      const res = await fetch('/api/folders/subfolder', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({ name, parentId: parent.id }),
+      });
+      if (res.status === 401) return logout();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not create the folder.');
+      setError('');
+
+      // Drive's folder index lags a second or two behind creation, so a refetch
+      // right now often comes back without the new folder. Insert it locally so
+      // it appears immediately, then reconcile in the background.
+      const graft = (nodes) =>
+        nodes.map((n) =>
+          n.id === parent.id
+            ? { ...n, children: [...(n.children || []), { ...data.folder, children: [] }] }
+            : { ...n, children: graft(n.children || []) }
+        );
+      setTree((prev) => graft(prev));
+      chooseFolder(data.folder.id);
+      // Reconcile once Drive has indexed it; until then the local node stands.
+      setTimeout(() => loadTree(true, data.folder.id), 4000);
+    } catch (err) {
+      setError(err?.message || 'Could not create the folder.');
     }
   };
 
@@ -449,6 +526,17 @@ export default function FilesPage() {
     }
   };
 
+  // Name of the open folder, found anywhere in the tree.
+  const findName = (nodes) => {
+    for (const n of nodes) {
+      if (n.id === folderId) return n.name;
+      const hit = findName(n.children || []);
+      if (hit) return hit;
+    }
+    return '';
+  };
+  const currentFolderName = findName(tree);
+
   if (!ready) return null;
 
   return (
@@ -457,6 +545,7 @@ export default function FilesPage() {
       actions={
         <>
           <span className="muted">
+            {currentFolderName ? `${currentFolderName} · ` : ''}
             {files.length} file{files.length === 1 ? '' : 's'}
           </span>
           <div className="view-toggle" role="group" aria-label="View">
@@ -482,7 +571,67 @@ export default function FilesPage() {
         </>
       }
     >
-      <div
+      <div className="files-layout">
+          <aside className="files-panel">
+            <div className="sidebar-heading">
+              <span>Folders</span>
+              <button
+                type="button"
+                onClick={() => loadTree(true)}
+                aria-label="Refresh folder tree"
+                title="Refresh"
+              >
+                ⟳
+              </button>
+            </div>
+
+            {tree.length === 0 ? (
+              <p className="sidebar-hint">No folders yet.</p>
+            ) : (
+              <FolderTree
+                nodes={tree}
+                selectedId={folderId}
+                onSelect={chooseFolder}
+                onCreate={handleAddSubfolder}
+                onRemove={handleRemoveFolder}
+              />
+            )}
+
+            {addingFolder ? (
+              <form className="folder-form" onSubmit={handleAddFolder}>
+                <input
+                  autoFocus
+                  placeholder="Name"
+                  value={newFolder.name}
+                  onChange={(e) => setNewFolder((v) => ({ ...v, name: e.target.value }))}
+                  maxLength={60}
+                />
+                <input
+                  placeholder="Drive folder id or URL"
+                  value={newFolder.id}
+                  onChange={(e) => setNewFolder((v) => ({ ...v, id: e.target.value }))}
+                />
+                <div className="folder-form-row">
+                  <button type="submit" disabled={!newFolder.name.trim() || !newFolder.id.trim()}>
+                    Add
+                  </button>
+                  <button type="button" className="ghost" onClick={() => setAddingFolder(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <button
+                type="button"
+                className="folder-add"
+                onClick={() => setAddingFolder(true)}
+              >
+                + Add folder
+              </button>
+            )}
+          </aside>
+
+        <div
           className={`files-main${dragging ? ' dragging' : ''}`}
           onDragOver={(e) => {
             e.preventDefault();
@@ -498,64 +647,6 @@ export default function FilesPage() {
               server.
             </div>
           )}
-
-          <div className="folder-bar">
-            <div className="folder-tabs" role="tablist" aria-label="Drive folders">
-              {folders.map((f) => (
-                <span
-                  key={f.id}
-                  className={`folder-tab${f.id === folderId ? ' active' : ''}`}
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={f.id === folderId}
-                    onClick={() => chooseFolder(f.id)}
-                    title={f.name}
-                  >
-                    {f.name}
-                  </button>
-                  <button
-                    type="button"
-                    className="folder-x"
-                    onClick={() => handleRemoveFolder(f)}
-                    aria-label={`Remove ${f.name} from the list`}
-                    title="Remove from list (keeps the Drive folder)"
-                  >
-                    ✕
-                  </button>
-                </span>
-              ))}
-              <button
-                type="button"
-                className="folder-add"
-                onClick={() => setAddingFolder((v) => !v)}
-                aria-expanded={addingFolder}
-              >
-                {addingFolder ? 'Cancel' : '+ Add folder'}
-              </button>
-            </div>
-
-            {addingFolder && (
-              <form className="folder-form" onSubmit={handleAddFolder}>
-                <input
-                  autoFocus
-                  placeholder="Name (e.g. Invoices)"
-                  value={newFolder.name}
-                  onChange={(e) => setNewFolder((v) => ({ ...v, name: e.target.value }))}
-                  maxLength={60}
-                />
-                <input
-                  placeholder="Drive folder id or URL"
-                  value={newFolder.id}
-                  onChange={(e) => setNewFolder((v) => ({ ...v, id: e.target.value }))}
-                />
-                <button type="submit" disabled={!newFolder.name.trim() || !newFolder.id.trim()}>
-                  Add
-                </button>
-              </form>
-            )}
-          </div>
 
           <button
             type="button"
@@ -772,8 +863,10 @@ export default function FilesPage() {
               )}
             </ul>
           )}
+        </div>
+      </div>
 
-        {viewing && (
+      {viewing && (
           <div
             className="viewer"
             role="dialog"
@@ -824,7 +917,6 @@ export default function FilesPage() {
             </div>
           </div>
         )}
-      </div>
     </Shell>
   );
 }

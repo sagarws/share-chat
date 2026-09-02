@@ -20,9 +20,10 @@ const NAV = [
  *
  * @param {string}      title    page name shown in the header
  * @param {ReactNode}   actions  optional header-right content (status, buttons)
+ * @param {ReactNode}   aside    optional sidebar content below the nav
  * @param {ReactNode}   children page body
  */
-export default function Shell({ title, actions, children }) {
+export default function Shell({ title, actions, aside, children }) {
   const pathname = usePathname();
   const [edit, setEdit] = useState(false);
   const [open, setOpen] = useState(false);
@@ -106,6 +107,8 @@ export default function Shell({ title, actions, children }) {
               );
             })}
           </ul>
+
+          {aside}
 
           {edit && (
             <form className="sidebar-foot" onSubmit={handleChangePwd}>

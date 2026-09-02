@@ -625,8 +625,7 @@ button:disabled {
   overflow-y: auto;
   padding: 16px;
   width: 100%;
-  max-width: 1000px;
-  margin: 0 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1252,78 +1251,16 @@ button.card-preview {
 
 /* --- drive folder tabs ---------------------------------------------------- */
 
-.folder-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
 
-.folder-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
 
-.folder-tab {
-  display: inline-flex;
-  align-items: stretch;
-  background: #1c2030;
-  border: 1px solid #2a2f3e;
-  border-radius: 999px;
-  overflow: hidden;
-}
 
-.folder-tab > button {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  color: #b9c0d0;
-  font-size: 13px;
-  font-weight: 500;
-  padding: 6px 4px 6px 13px;
-  cursor: pointer;
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.folder-tab .folder-x {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  color: #667085;
-  font-size: 10px;
-  padding: 0 10px 0 6px;
-  cursor: pointer;
-  line-height: 1;
-}
 
-.folder-tab .folder-x:hover {
-  color: #f87171;
-}
 
-.folder-tab:hover {
-  border-color: #3a4260;
-}
 
-.folder-tab.active {
-  background: #4b6bff;
-  border-color: transparent;
-}
 
-.folder-tab.active > button {
-  color: #fff;
-}
 
-.folder-tab.active .folder-x {
-  color: rgba(255, 255, 255, 0.65);
-}
 
-.folder-tab.active .folder-x:hover {
-  color: #fff;
-}
 
 .folder-add {
   background: transparent;
@@ -1357,4 +1294,250 @@ button.card-preview {
 .folder-form button {
   padding: 8px 16px;
   font-size: 13px;
+}
+
+/* --- sidebar folder tree -------------------------------------------------- */
+
+.files-layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.files-panel {
+  flex-shrink: 0;
+  width: 224px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 10px;
+  border-right: 1px solid #1e2230;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.sidebar-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #667085;
+  padding: 0 4px;
+}
+
+.sidebar-heading button {
+  background: transparent;
+  border: none;
+  color: #667085;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 13px;
+  border-radius: 6px;
+}
+
+.sidebar-heading button:hover {
+  color: #e6e8ee;
+  background: #1c2030;
+}
+
+.sidebar-hint {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 12px;
+  color: #667085;
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+  min-width: 0;
+}
+
+.tree-row:hover {
+  background: #1c2030;
+}
+
+.tree-row.active {
+  background: #4b6bff;
+}
+
+.tree-children {
+  margin-left: 9px;
+  padding-left: 9px;
+  border-left: 1px solid #232838;
+}
+
+.tree-caret {
+  flex-shrink: 0;
+  width: 16px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: #667085;
+  font-size: 9px;
+  padding: 4px 0;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.tree-caret:hover {
+  color: #e6e8ee;
+}
+
+.tree-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #667085;
+  background: #1c2030;
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.tree-row.active .tree-count {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.tree-new-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.tree-new-btn:hover {
+  background: #1c2030;
+  color: #8aa2ff;
+}
+
+.tree-new input {
+  width: 100%;
+  background: #0f1218;
+  border: 1px solid #4b6bff;
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
+.tree-row.active .tree-caret {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: #b9c0d0;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  padding: 6px 2px;
+  cursor: pointer;
+}
+
+.tree-row.active .tree-name {
+  color: #fff;
+}
+
+.tree-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 5px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.tree-row:hover .tree-action,
+.tree-row.active .tree-action {
+  opacity: 1;
+}
+
+.tree-action:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #e6e8ee;
+}
+
+.tree-action.danger:hover {
+  color: #f87171;
+}
+
+.folder-form-row {
+  display: flex;
+  gap: 6px;
+}
+
+.folder-form-row button {
+  flex: 1;
+}
+
+.folder-form .ghost {
+  background: transparent;
+  border: 1px solid #2a2f3e;
+  color: #8a93a6;
+}
+
+/* --- folder panel inside the File Share page ------------------------------ */
+
+.files-panel .sidebar-heading {
+  padding: 0 4px 2px;
+}
+
+.files-panel .folder-add {
+  margin-top: 4px;
+}
+
+@media (max-width: 720px) {
+  .files-layout {
+    flex-direction: column;
+  }
+
+  .files-panel {
+    width: auto;
+    max-height: 190px;
+    border-right: none;
+    border-bottom: 1px solid #1e2230;
+    padding: 10px;
+  }
 }

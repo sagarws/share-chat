@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { verifyToken, getSelectedFolder, getFolder } from '../../../db';
+import { verifyToken, getSelectedFolder } from '../../../db';
 import { isConfigured, uploadFile, listDriveFiles } from '../../../drive';
 
 export const runtime = 'nodejs';
@@ -90,9 +90,10 @@ export async function POST(req) {
   const uploader = decode(req.headers.get('x-uploader')).trim().slice(0, 30);
 
   // Upload into the folder the client has selected, falling back to the
-  // remembered default. Only registered folders are accepted.
+  // remembered default. Any folder in the tree is valid, including a
+  // subfolder; an id Drive cannot reach fails with a clear error below.
   const asked = decode(req.headers.get('x-folder')).trim();
-  const folderId = asked && getFolder(asked) ? asked : getSelectedFolder();
+  const folderId = asked || getSelectedFolder();
   if (!folderId) {
     return NextResponse.json(
       { ok: false, error: 'No Drive folder configured. Add one first.' },

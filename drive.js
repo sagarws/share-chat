@@ -7,6 +7,12 @@
 // Scope is drive.file, so this app can only ever see files it created
 // itself — the rest of the owner's Drive is invisible to it.
 
+// Next.js patches global fetch inside route handlers and caches responses.
+// Drive is a live API, so every call here opts out explicitly — without this a
+// folder listing taken moments after a folder was created stays cached and
+// empty, and no later request ever sees the new folder.
+const NO_CACHE = { cache: 'no-store' };
+
 const FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 const TOKEN_API = 'https://oauth2.googleapis.com/token';
@@ -39,6 +45,7 @@ const getAccessToken = async () => {
   if (cached.token && Date.now() < cached.expiresAt) return cached.token;
 
   const res = await fetch(TOKEN_API, {
+    ...NO_CACHE,
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -88,6 +95,7 @@ const uploadFile = async ({ name, mime, size, uploader, folderId, body }) => {
   if (!folderId) throw new Error('No destination folder selected.');
 
   const initRes = await fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
+    ...NO_CACHE,
     method: 'POST',
     headers: {
       ...(await authHeaders()),
@@ -124,6 +132,7 @@ const uploadFile = async ({ name, mime, size, uploader, folderId, body }) => {
 
   const isStream = body && typeof body.getReader === 'function';
   const putRes = await fetch(session, {
+    ...NO_CACHE,
     method: 'PUT',
     headers: { 'Content-Type': mime, 'Content-Length': String(size) },
     body,
@@ -169,7 +178,7 @@ const listDriveFiles = async (folderId) => {
     });
     if (pageToken) params.set('pageToken', pageToken);
 
-    const res = await fetch(`${FILES_API}?${params}`, { headers: await authHeaders() });
+    const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
     const data = await res.json().catch(() => ({}));
     if (res.status === 404) {
       // Drive answers 404 (not an empty list) for a folder this app cannot
@@ -206,11 +215,98 @@ const listDriveFiles = async (folderId) => {
   return out;
 };
 
+/**
+ * Subfolders of `parentId`.
+ *
+ * Only folders this app created are visible under the drive.file scope, so a
+ * subfolder made by hand in the Drive web UI will not appear here — use the
+ * app's own "new subfolder" action instead.
+ */
+const listSubfolders = async (parentId) => {
+  if (!parentId) return [];
+  const params = new URLSearchParams({
+    q:
+      `'${parentId.replace(/'/g, "\\'")}' in parents ` +
+      "and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+    fields: 'files(id,name)',
+    orderBy: 'name',
+    pageSize: '200',
+    supportsAllDrives: 'true',
+  });
+  const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
+  if (res.status === 404) return [];
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Drive folder listing failed (${res.status}).`);
+  }
+  return (data.files || []).map((f) => ({ id: f.id, name: f.name }));
+};
+
+/** Create a subfolder and return its id. */
+const createFolder = async (name, parentId) => {
+  const res = await fetch(`${FILES_API}?fields=id,name&supportsAllDrives=true`, {
+    ...NO_CACHE,
+    method: 'POST',
+    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+      ...(parentId ? { parents: [parentId] } : {}),
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404) {
+    throw new Error('The parent folder could not be found in the connected Drive account.');
+  }
+  if (!res.ok || !data.id) {
+    throw new Error(`Could not create the folder (${res.status}).`);
+  }
+  return { id: data.id, name: data.name };
+};
+
+/**
+ * Walk the folder tree below `roots`, breadth-first, one Drive call per node.
+ *
+ * Bounded on both depth and node count: a deep or wide tree would otherwise
+ * mean an unbounded number of API calls on every page load.
+ */
+const buildFolderTree = async (roots, { maxDepth = 6, maxNodes = 250 } = {}) => {
+  let budget = maxNodes;
+
+  const walk = async (id, depth) => {
+    if (depth >= maxDepth || budget <= 0) return [];
+    let kids;
+    try {
+      kids = await listSubfolders(id);
+    } catch {
+      return []; // an unreachable branch should not fail the whole tree
+    }
+    const slice = kids.slice(0, Math.max(0, budget));
+    budget -= slice.length;
+    return Promise.all(
+      slice.map(async (k) => ({
+        id: k.id,
+        name: k.name,
+        children: await walk(k.id, depth + 1),
+      }))
+    );
+  };
+
+  return Promise.all(
+    roots.map(async (r) => ({
+      id: r.id,
+      name: r.name,
+      root: true,
+      children: await walk(r.id, 0),
+    }))
+  );
+};
+
 /** Metadata for one file, or null if it is gone. */
 const getFileMeta = async (fileId) => {
   const res = await fetch(
     `${FILES_API}/${encodeURIComponent(fileId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
-    { headers: await authHeaders() }
+    { ...NO_CACHE, headers: await authHeaders() }
   );
   if (res.status === 404) return null;
   const data = await res.json().catch(() => ({}));
@@ -238,7 +334,7 @@ const getFileMeta = async (fileId) => {
 const downloadFile = async (fileId) => {
   const res = await fetch(
     `${FILES_API}/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
-    { headers: await authHeaders() }
+    { ...NO_CACHE, headers: await authHeaders() }
   );
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -263,8 +359,8 @@ const getThumbnail = async (fileId, size = 400) => {
   // Drive appends a size hint like "=s220"; swap it for the size we want.
   const url = meta.thumbnailLink.replace(/=s\d+(-c)?$/, `=s${size}`);
 
-  let res = await fetch(url);
-  if (!res.ok) res = await fetch(url, { headers: await authHeaders() });
+  let res = await fetch(url, NO_CACHE);
+  if (!res.ok) res = await fetch(url, { ...NO_CACHE, headers: await authHeaders() });
   if (!res.ok) return null;
   return res;
 };
@@ -284,6 +380,7 @@ const shareFile = async (fileId) => {
     const res = await fetch(
       `${FILES_API}/${encodeURIComponent(fileId)}/permissions?supportsAllDrives=true`,
       {
+        ...NO_CACHE,
         method: 'POST',
         headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: 'reader', type: 'anyone' }),
@@ -305,7 +402,7 @@ const shareFile = async (fileId) => {
 const deleteFile = async (fileId) => {
   const res = await fetch(
     `${FILES_API}/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
-    { method: 'DELETE', headers: await authHeaders() }
+    { ...NO_CACHE, method: 'DELETE', headers: await authHeaders() }
   );
   if (!res.ok && res.status !== 404) {
     const detail = await res.text().catch(() => '');
@@ -317,6 +414,9 @@ module.exports = {
   isConfigured,
   uploadFile,
   listDriveFiles,
+  listSubfolders,
+  createFolder,
+  buildFolderTree,
   getFileMeta,
   shareFile,
   getThumbnail,
