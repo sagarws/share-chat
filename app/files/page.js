@@ -72,6 +72,7 @@ export default function FilesPage() {
   // An image waiting on the "add a description?" question.
   const [pending, setPending] = useState(null);
   const [pendingText, setPendingText] = useState('');
+  const [pendingName, setPendingName] = useState('');
   const [stampCaption, setStampCaption] = useState(true);
   const [preparing, setPreparing] = useState(false);
   const [folders, setFolders] = useState([]);
@@ -246,6 +247,9 @@ export default function FilesPage() {
     if (isImage(file) && !options.answered) {
       setPending(file);
       setPendingText(descDraft.trim());
+      // Offer the current name without its extension, which is the part worth
+      // editing — a pasted screenshot arrives as "pasted-2026-09-02-144201".
+      setPendingName(file.name.replace(/\.[^.]+$/, ''));
       setStampCaption(true);
       return;
     }
@@ -292,8 +296,13 @@ export default function FilesPage() {
       }
       if (xhr.status === 401) return logout();
       if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
+        // Show it straight away, then refetch: the row returned here has no
+        // thumbnail or share state, and Drive needs a moment to render a
+        // preview for a freshly uploaded image.
         setFiles((prev) => [data.file, ...prev]);
         setDescDraft('');
+        loadFiles(folderId);
+        setTimeout(() => loadFiles(folderId), 6000);
       } else {
         setError(data.error || `Upload failed (${xhr.status}).`);
       }
@@ -436,6 +445,17 @@ export default function FilesPage() {
   const thumbHref = (id, size) =>
     `/api/files/${id}/thumb?s=${size}&token=${encodeURIComponent(getToken())}`;
 
+  // Drive renders thumbnails asynchronously, so a just-uploaded image has none
+  // for a while. Rather than showing a placeholder icon, fall back to the image
+  // itself — capped by size so a grid never pulls down huge originals.
+  const INLINE_PREVIEW_LIMIT = 4 * 1024 * 1024;
+
+  const previewSrc = (f, size) => {
+    if (f.hasThumb) return thumbHref(f.id, size);
+    if (f.mime.startsWith('image/') && f.size <= INLINE_PREVIEW_LIMIT) return viewHref(f.id);
+    return '';
+  };
+
   // Paste an image (or any copied file) anywhere on the page to upload it.
   // Registered after `startUpload` exists and re-registered whenever the
   // things it closes over change, so it never uploads with a stale cap.
@@ -472,8 +492,20 @@ export default function FilesPage() {
     setPreparing(true);
     try {
       let toUpload = file;
+
+      // Rename before captioning, so the caption step keeps the chosen name.
+      const chosen = pendingName.trim().replace(/[\\/]/g, '-').slice(0, 120);
+      const original = file.name.replace(/\.[^.]+$/, '');
+      if (chosen && chosen !== original) {
+        const ext = file.name.match(/\.[^.]+$/)?.[0] || '';
+        toUpload = new File([file], `${chosen}${ext}`, {
+          type: file.type,
+          lastModified: file.lastModified,
+        });
+      }
+
       if (text && stampCaption) {
-        toUpload = await addCaption(file, text);
+        toUpload = await addCaption(toUpload, text);
         if (toUpload.size > maxBytes) {
           setError(
             `With the caption added the image is ${formatSize(toUpload.size)}, over the ` +
@@ -484,6 +516,7 @@ export default function FilesPage() {
       }
       setPending(null);
       setPendingText('');
+      setPendingName('');
       startUpload(toUpload, { answered: true, description: text });
     } catch (err) {
       setError(err?.message || 'Could not prepare the image.');
@@ -812,10 +845,10 @@ export default function FilesPage() {
                       }
                       aria-label={canPreview(f.mime) ? `View ${f.name}` : `Download ${f.name}`}
                     >
-                      {f.hasThumb ? (
+                      {previewSrc(f, 400) ? (
                         /* eslint-disable-next-line @next/next/no-img-element */
                         <img
-                          src={thumbHref(f.id, 400)}
+                          src={previewSrc(f, 400)}
                           alt=""
                           loading="lazy"
                           onError={(e) => {
@@ -828,7 +861,7 @@ export default function FilesPage() {
                       ) : null}
                       <span
                         className="card-icon"
-                        style={f.hasThumb ? { display: 'none' } : undefined}
+                        style={previewSrc(f, 400) ? { display: 'none' } : undefined}
                       >
                         {iconFor(f.mime, f.name)}
                       </span>
@@ -906,10 +939,10 @@ export default function FilesPage() {
                 ) : (
                 <li key={f.id} className="file-row">
                   <span className="file-thumb">
-                    {f.hasThumb ? (
+                    {previewSrc(f, 128) ? (
                       /* eslint-disable-next-line @next/next/no-img-element */
                       <img
-                        src={thumbHref(f.id, 128)}
+                        src={previewSrc(f, 128)}
                         alt=""
                         loading="lazy"
                         onError={(e) => {
@@ -993,9 +1026,23 @@ export default function FilesPage() {
         <div className="dialog" role="dialog" aria-modal="true">
           <div className="dialog-card">
             <h2>Add a description?</h2>
-            <p className="muted dialog-sub">{pending.name}</p>
-            <textarea
+            <label className="dialog-label" htmlFor="upload-name">
+              File name
+            </label>
+            <input
+              id="upload-name"
               autoFocus
+              value={pendingName}
+              onChange={(e) => setPendingName(e.target.value)}
+              maxLength={120}
+              placeholder="Name for this image"
+              disabled={preparing}
+            />
+            <label className="dialog-label" htmlFor="upload-desc">
+              Description
+            </label>
+            <textarea
+              id="upload-desc"
               rows={3}
               value={pendingText}
               onChange={(e) => setPendingText(e.target.value)}

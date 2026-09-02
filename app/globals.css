@@ -1642,3 +1642,19 @@ button.card-preview {
   line-height: 1.5;
   color: #667085;
 }
+
+.dialog-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #667085;
+  margin-top: 2px;
+}
+
+.dialog-card input[type='text'],
+.dialog-card input:not([type]) {
+  width: 100%;
+  background: #0f1218;
+  padding: 9px 11px;
+  font-size: 13px;
+}
