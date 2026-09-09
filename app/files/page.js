@@ -8,10 +8,11 @@ import { clearAuth, isAuthValid, getToken } from '../auth';
 import { fileFromPaste } from '../clipboard';
 import { addCaption, isImage } from '../imageCaption';
 
-// Fallback only — the real cap comes from GET /api/files, which reads
-// MAX_UPLOAD_BYTES on the server. Keeping them in sync avoids a client-side
-// limit that silently disagrees with what the route will accept.
-const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+// 0 means "no cap", which is the default. The real value comes from
+// GET /api/files, which reports the server's MAX_UPLOAD_BYTES — matching it
+// avoids a client-side limit that silently disagrees with what the route
+// will accept.
+const DEFAULT_MAX_BYTES = 0;
 
 const formatSize = (bytes) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -110,7 +111,8 @@ export default function FilesPage() {
         if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load files.');
         setFiles(data.files || []);
         setConfigured(data.configured !== false);
-        if (Number(data.maxBytes) > 0) setMaxBytes(Number(data.maxBytes));
+        const cap = Number(data.maxBytes);
+        if (Number.isFinite(cap) && cap >= 0) setMaxBytes(cap);
         setError('');
       } catch (err) {
         setFiles([]);
@@ -258,7 +260,7 @@ export default function FilesPage() {
       setError('That file is empty.');
       return;
     }
-    if (file.size > maxBytes) {
+    if (maxBytes > 0 && file.size > maxBytes) {
       setError(`File is too large (max ${formatSize(maxBytes)}).`);
       return;
     }
@@ -506,7 +508,7 @@ export default function FilesPage() {
 
       if (text && stampCaption) {
         toUpload = await addCaption(toUpload, text);
-        if (toUpload.size > maxBytes) {
+        if (maxBytes > 0 && toUpload.size > maxBytes) {
           setError(
             `With the caption added the image is ${formatSize(toUpload.size)}, over the ` +
               `${formatSize(maxBytes)} limit. Uncheck the caption or shorten the text.`
@@ -786,7 +788,9 @@ export default function FilesPage() {
             <span className="drop-title">
               {upload ? 'Uploading…' : 'Click to choose a file, drop it here, or paste'}
             </span>
-            <span className="drop-hint">Up to {formatSize(maxBytes)}</span>
+            <span className="drop-hint">
+              {maxBytes > 0 ? `Up to ${formatSize(maxBytes)}` : 'Any file size'}
+            </span>
           </button>
 
           <input

@@ -5,7 +5,10 @@ import { isConfigured, uploadFile, listDriveFiles } from '../../../drive';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 100 * 1024 * 1024;
+// Uploads are unlimited by default: 0 means "no cap". The body is streamed
+// straight into a Drive resumable session, so nothing is buffered here and
+// size costs no memory. Set MAX_UPLOAD_BYTES to a byte count to reimpose one.
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 0;
 
 const formatSize = (bytes) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -108,7 +111,7 @@ export async function POST(req) {
   if (!Number.isFinite(size) || size <= 0) {
     return NextResponse.json({ ok: false, error: 'File is empty.' }, { status: 400 });
   }
-  if (size > MAX_UPLOAD_BYTES) {
+  if (MAX_UPLOAD_BYTES > 0 && size > MAX_UPLOAD_BYTES) {
     return NextResponse.json(
       { ok: false, error: `File is too large (max ${formatSize(MAX_UPLOAD_BYTES)}).` },
       { status: 413 }
