@@ -1,8 +1,16 @@
 // Minimal Google Drive v3 client — no SDK, just fetch.
 //
-// Auth model: a long-lived refresh token (minted once by
-// scripts/get-google-refresh-token.js) is traded for short-lived access
-// tokens, which we cache in memory until just before they expire.
+// Auth model: a long-lived refresh token is traded for short-lived access
+// tokens, which we cache in memory until just before they expire. There are
+// two kinds of refresh token:
+//
+//   - the shared one in GOOGLE_REFRESH_TOKEN (minted once by
+//     scripts/get-google-refresh-token.js), used by anyone who has not
+//     connected a Drive of their own;
+//   - one per user who connected their own Google Drive on the /drive page,
+//     stored in the database.
+//
+// createClient(refreshToken) returns the same Drive API for either.
 //
 // Scope is drive.file, so this app can only ever see files it created
 // itself — the rest of the owner's Drive is invisible to it.
@@ -15,7 +23,23 @@ const NO_CACHE = { cache: 'no-store' };
 
 const FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
+
 const TOKEN_API = 'https://oauth2.googleapis.com/token';
+const AUTH_API = 'https://accounts.google.com/o/oauth2/v2/auth';
+const USERINFO_API = 'https://openidconnect.googleapis.com/v1/userinfo';
+const REVOKE_API = 'https://oauth2.googleapis.com/revoke';
+
+// drive.file keeps the app inside the files it created; openid/email/profile
+// only identify who connected, so the /drive page can show whose Drive it is.
+const USER_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'openid',
+  'email',
+  'profile',
+].join(' ');
+
+// Name of the folder created in a connected user's Drive to hold their uploads.
+const APP_FOLDER_NAME = 'Share Chat';
 
 const config = () => ({
   clientId: process.env.GOOGLE_CLIENT_ID || '',
@@ -30,19 +54,28 @@ const isConfigured = () => {
   return Boolean(c.clientId && c.clientSecret && c.refreshToken);
 };
 
-// Cached access token. Google's expire in ~1h; refresh 60s early so a
-// long-running upload doesn't start with a token that dies mid-flight.
-let cached = { token: '', expiresAt: 0 };
-
-const getAccessToken = async () => {
+// Users can connect their own Drive whenever the OAuth client exists, even if
+// no shared refresh token was minted.
+const isOAuthConfigured = () => {
   const c = config();
-  if (!isConfigured()) {
+  return Boolean(c.clientId && c.clientSecret);
+};
+
+// Cached access tokens, keyed by refresh token. Google's expire in ~1h;
+// refresh 60s early so a long-running upload doesn't start with a token that
+// dies mid-flight.
+const tokenCache = new Map();
+
+const getAccessToken = async (refreshToken, { shared }) => {
+  const c = config();
+  if (!c.clientId || !c.clientSecret || !refreshToken) {
     throw new Error(
       'Google Drive is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ' +
         'GOOGLE_REFRESH_TOKEN and GOOGLE_DRIVE_FOLDER_ID.'
     );
   }
-  if (cached.token && Date.now() < cached.expiresAt) return cached.token;
+  const cached = tokenCache.get(refreshToken);
+  if (cached && Date.now() < cached.expiresAt) return cached.token;
 
   const res = await fetch(TOKEN_API, {
     ...NO_CACHE,
@@ -51,14 +84,22 @@ const getAccessToken = async () => {
     body: new URLSearchParams({
       client_id: c.clientId,
       client_secret: c.clientSecret,
-      refresh_token: c.refreshToken,
+      refresh_token: refreshToken,
       grant_type: 'refresh_token',
     }),
   });
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok || !data.access_token) {
-    cached = { token: '', expiresAt: 0 };
+    tokenCache.delete(refreshToken);
+    if (!shared && data.error === 'invalid_grant') {
+      const err = new Error(
+        'Your Google Drive connection has expired or was removed. ' +
+          'Reconnect it on the Google Drive page.'
+      );
+      err.code = 'DRIVE_RECONNECT';
+      throw err;
+    }
     // invalid_grant almost always means the OAuth app is still in "Testing"
     // (Google expires those refresh tokens after 7 days) or access was revoked.
     const hint =
@@ -73,379 +114,518 @@ const getAccessToken = async () => {
   }
 
   const ttl = Number(data.expires_in) || 3600;
-  cached = { token: data.access_token, expiresAt: Date.now() + (ttl - 60) * 1000 };
-  return cached.token;
+  tokenCache.set(refreshToken, {
+    token: data.access_token,
+    expiresAt: Date.now() + (ttl - 60) * 1000,
+  });
+  return data.access_token;
 };
 
-const authHeaders = async () => ({ Authorization: `Bearer ${await getAccessToken()}` });
+// --- Connecting a user's own Drive (OAuth web flow) ------------------------
 
-/**
- * Upload bytes to `folderId` using a resumable session, so the request body
- * streams through instead of being buffered in memory. Returns the new Drive
- * file id.
- *
- * @param {object}  opts
- * @param {string}  opts.name
- * @param {string}  opts.mime
- * @param {number}  opts.size          exact byte length of `body`
- * @param {string}  opts.folderId      destination Drive folder
- * @param {ReadableStream|Buffer} opts.body
- */
-const uploadFile = async ({ name, mime, size, uploader, description, folderId, body }) => {
-  if (!folderId) throw new Error('No destination folder selected.');
+/** The Google consent screen URL a user is sent to from the /drive page. */
+const buildAuthUrl = ({ redirectUri, state }) =>
+  `${AUTH_API}?${new URLSearchParams({
+    client_id: config().clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: USER_SCOPES,
+    // offline + consent are what make Google hand back a refresh_token, even
+    // for a user who connected before.
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state,
+  })}`;
 
-  const initRes = await fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
+/** Trade the one-time code from the consent screen for tokens. */
+const exchangeCode = async ({ code, redirectUri }) => {
+  const c = config();
+  const res = await fetch(TOKEN_API, {
     ...NO_CACHE,
     method: 'POST',
-    headers: {
-      ...(await authHeaders()),
-      'Content-Type': 'application/json; charset=UTF-8',
-      'X-Upload-Content-Type': mime,
-      'X-Upload-Content-Length': String(size),
-    },
-    body: JSON.stringify({
-      name,
-      parents: [folderId],
-      // Drive shows this in the file's details panel, so it is visible from
-      // Drive itself and not only inside this app.
-      ...(description ? { description } : {}),
-      // appProperties are private to this OAuth client, so the uploader's
-      // name rides along with the file instead of living in a local table
-      // that a redeploy would wipe.
-      appProperties: uploader ? { uploader } : undefined,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: c.clientId,
+      client_secret: c.clientSecret,
+      redirect_uri: redirectUri,
+      grant_type: 'authorization_code',
     }),
   });
-
-  if (initRes.status === 404) {
-    // Under the drive.file scope Drive only acknowledges folders this app can
-    // reach. A mistyped id, or a folder belonging to a different account, lands
-    // here — say so plainly rather than silently filing the upload elsewhere.
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
     throw new Error(
-      'That Drive folder could not be found. Check the folder id, and that it ' +
-        'belongs to the connected Google account.'
+      `Google sign-in failed: ${data.error_description || data.error || res.status}`
     );
   }
-  if (!initRes.ok) {
-    const detail = await initRes.text().catch(() => '');
-    throw new Error(`Drive rejected the upload (${initRes.status}). ${detail.slice(0, 300)}`);
+  if (!data.refresh_token) {
+    throw new Error('Google did not return offline access. Please try connecting again.');
   }
-
-  const session = initRes.headers.get('location');
-  if (!session) throw new Error('Drive did not return an upload session URL.');
-
-  const isStream = body && typeof body.getReader === 'function';
-  const putRes = await fetch(session, {
-    ...NO_CACHE,
-    method: 'PUT',
-    headers: { 'Content-Type': mime, 'Content-Length': String(size) },
-    body,
-    // Required by undici to send a streaming request body.
-    ...(isStream ? { duplex: 'half' } : {}),
+  // Drive access is optional on the consent screen; without it nothing works.
+  const granted = String(data.scope || '').split(' ');
+  if (!granted.includes('https://www.googleapis.com/auth/drive.file')) {
+    throw new Error(
+      'Google Drive access was not allowed. Connect again and tick the Google Drive box.'
+    );
+  }
+  const ttl = Number(data.expires_in) || 3600;
+  tokenCache.set(data.refresh_token, {
+    token: data.access_token,
+    expiresAt: Date.now() + (ttl - 60) * 1000,
   });
-
-  if (!putRes.ok) {
-    const detail = await putRes.text().catch(() => '');
-    throw new Error(`Drive upload failed (${putRes.status}). ${detail.slice(0, 300)}`);
-  }
-
-  const created = await putRes.json().catch(() => ({}));
-  if (!created.id) throw new Error('Drive did not return a file id.');
-  return created.id;
+  return { accessToken: data.access_token, refreshToken: data.refresh_token };
 };
 
-const FILE_FIELDS =
-  'id,name,mimeType,size,createdTime,description,appProperties,webViewLink,shared,thumbnailLink';
+/** Who just connected: Google's stable account id, email, name and avatar. */
+const fetchUserInfo = async (accessToken) => {
+  const res = await fetch(USERINFO_API, {
+    ...NO_CACHE,
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.sub) {
+    throw new Error('Could not read your Google account details.');
+  }
+  return {
+    sub: String(data.sub),
+    email: data.email || '',
+    name: data.name || data.email || 'Google user',
+    picture: data.picture || '',
+  };
+};
+
+/** Revoke a refresh token at Google. Best effort — failure is not fatal. */
+const revokeToken = async (refreshToken) => {
+  tokenCache.delete(refreshToken);
+  try {
+    await fetch(`${REVOKE_API}?${new URLSearchParams({ token: refreshToken })}`, {
+      ...NO_CACHE,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+  } catch {
+    // the local record is removed either way
+  }
+};
 
 /**
- * List the files this app created inside `folderId`, newest first.
+ * A Drive client bound to one refresh token.
  *
- * Under the drive.file scope Drive only ever returns files created by this
- * OAuth client, so the result set is exactly our uploads in that folder —
- * nothing to reconcile against a local database, which is what makes the
- * listing survive a wiped disk.
+ * @param {string}  refreshToken
+ * @param {object}  [opts]
+ * @param {boolean} [opts.shared]  true for the env account; changes the error
+ *                                 shown when the token has been revoked
  */
-const listDriveFiles = async (folderId) => {
-  if (!folderId) return [];
-  const out = [];
-  let pageToken = '';
+function createClient(refreshToken, { shared = false } = {}) {
+  const authHeaders = async () => ({
+    Authorization: `Bearer ${await getAccessToken(refreshToken, { shared })}`,
+  });
 
-  do {
-    const params = new URLSearchParams({
-      q:
-        `'${folderId.replace(/'/g, "\\'")}' in parents ` +
-        "and mimeType != 'application/vnd.google-apps.folder' and trashed = false",
-      fields: `nextPageToken, files(${FILE_FIELDS})`,
-      orderBy: 'createdTime desc',
-      pageSize: '200',
-      supportsAllDrives: 'true',
+  /**
+   * Upload bytes to `folderId` using a resumable session, so the request body
+   * streams through instead of being buffered in memory. Returns the new Drive
+   * file id.
+   *
+   * @param {object}  opts
+   * @param {string}  opts.name
+   * @param {string}  opts.mime
+   * @param {number}  opts.size          exact byte length of `body`
+   * @param {string}  opts.folderId      destination Drive folder
+   * @param {ReadableStream|Buffer} opts.body
+   */
+  const uploadFile = async ({ name, mime, size, uploader, description, folderId, body }) => {
+    if (!folderId) throw new Error('No destination folder selected.');
+
+    const initRes = await fetch(`${UPLOAD_API}?uploadType=resumable&supportsAllDrives=true`, {
+      ...NO_CACHE,
+      method: 'POST',
+      headers: {
+        ...(await authHeaders()),
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': mime,
+        'X-Upload-Content-Length': String(size),
+      },
+      body: JSON.stringify({
+        name,
+        parents: [folderId],
+        // Drive shows this in the file's details panel, so it is visible from
+        // Drive itself and not only inside this app.
+        ...(description ? { description } : {}),
+        // appProperties are private to this OAuth client, so the uploader's
+        // name rides along with the file instead of living in a local table
+        // that a redeploy would wipe.
+        appProperties: uploader ? { uploader } : undefined,
+      }),
     });
-    if (pageToken) params.set('pageToken', pageToken);
 
-    const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 404) {
-      // Drive answers 404 (not an empty list) for a folder this app cannot
-      // reach — a mistyped id, or one from another account.
+    if (initRes.status === 404) {
+      // Under the drive.file scope Drive only acknowledges folders this app can
+      // reach. A mistyped id, or a folder belonging to a different account, lands
+      // here — say so plainly rather than silently filing the upload elsewhere.
       throw new Error(
         'That Drive folder could not be found. Check the folder id, and that it ' +
           'belongs to the connected Google account.'
       );
     }
-    if (!res.ok) {
-      throw new Error(
-        `Drive listing failed (${res.status}). ${JSON.stringify(data).slice(0, 300)}`
-      );
+    if (!initRes.ok) {
+      const detail = await initRes.text().catch(() => '');
+      throw new Error(`Drive rejected the upload (${initRes.status}). ${detail.slice(0, 300)}`);
     }
 
-    for (const f of data.files || []) {
-      out.push({
-        id: f.id,
-        name: f.name,
-        mime: f.mimeType || 'application/octet-stream',
-        size: Number(f.size) || 0,
-        uploader: f.appProperties?.uploader || '',
-        description: f.description || '',
-        createdAt: Date.parse(f.createdTime) || 0,
-        link: f.webViewLink || '',
-        shared: Boolean(f.shared),
-        // The client only needs to know a preview exists; the URL itself is
-        // short-lived and is fetched server-side by /api/files/:id/thumb.
-        hasThumb: Boolean(f.thumbnailLink),
+    const session = initRes.headers.get('location');
+    if (!session) throw new Error('Drive did not return an upload session URL.');
+
+    const isStream = body && typeof body.getReader === 'function';
+    const putRes = await fetch(session, {
+      ...NO_CACHE,
+      method: 'PUT',
+      headers: { 'Content-Type': mime, 'Content-Length': String(size) },
+      body,
+      // Required by undici to send a streaming request body.
+      ...(isStream ? { duplex: 'half' } : {}),
+    });
+
+    if (!putRes.ok) {
+      const detail = await putRes.text().catch(() => '');
+      throw new Error(`Drive upload failed (${putRes.status}). ${detail.slice(0, 300)}`);
+    }
+
+    const created = await putRes.json().catch(() => ({}));
+    if (!created.id) throw new Error('Drive did not return a file id.');
+    return created.id;
+  };
+
+  const FILE_FIELDS =
+    'id,name,mimeType,size,createdTime,description,appProperties,webViewLink,shared,thumbnailLink';
+
+  /**
+   * List the files this app created inside `folderId`, newest first.
+   *
+   * Under the drive.file scope Drive only ever returns files created by this
+   * OAuth client, so the result set is exactly our uploads in that folder —
+   * nothing to reconcile against a local database, which is what makes the
+   * listing survive a wiped disk.
+   */
+  const listDriveFiles = async (folderId) => {
+    if (!folderId) return [];
+    const out = [];
+    let pageToken = '';
+
+    do {
+      const params = new URLSearchParams({
+        q:
+          `'${folderId.replace(/'/g, "\\'")}' in parents ` +
+          "and mimeType != 'application/vnd.google-apps.folder' and trashed = false",
+        fields: `nextPageToken, files(${FILE_FIELDS})`,
+        orderBy: 'createdTime desc',
+        pageSize: '200',
+        supportsAllDrives: 'true',
       });
+      if (pageToken) params.set('pageToken', pageToken);
+
+      const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 404) {
+        // Drive answers 404 (not an empty list) for a folder this app cannot
+        // reach — a mistyped id, or one from another account.
+        throw new Error(
+          'That Drive folder could not be found. Check the folder id, and that it ' +
+            'belongs to the connected Google account.'
+        );
+      }
+      if (!res.ok) {
+        throw new Error(
+          `Drive listing failed (${res.status}). ${JSON.stringify(data).slice(0, 300)}`
+        );
+      }
+
+      for (const f of data.files || []) {
+        out.push({
+          id: f.id,
+          name: f.name,
+          mime: f.mimeType || 'application/octet-stream',
+          size: Number(f.size) || 0,
+          uploader: f.appProperties?.uploader || '',
+          description: f.description || '',
+          createdAt: Date.parse(f.createdTime) || 0,
+          link: f.webViewLink || '',
+          shared: Boolean(f.shared),
+          // The client only needs to know a preview exists; the URL itself is
+          // short-lived and is fetched server-side by /api/files/:id/thumb.
+          hasThumb: Boolean(f.thumbnailLink),
+        });
+      }
+      pageToken = data.nextPageToken || '';
+    } while (pageToken);
+
+    return out;
+  };
+
+  /**
+   * Subfolders of `parentId`.
+   *
+   * Only folders this app created are visible under the drive.file scope, so a
+   * subfolder made by hand in the Drive web UI will not appear here — use the
+   * app's own "new subfolder" action instead.
+   */
+  const listSubfolders = async (parentId) => {
+    if (!parentId) return [];
+    const params = new URLSearchParams({
+      q:
+        `'${parentId.replace(/'/g, "\\'")}' in parents ` +
+        "and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+      fields: 'files(id,name)',
+      orderBy: 'name',
+      pageSize: '200',
+      supportsAllDrives: 'true',
+    });
+    const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
+    if (res.status === 404) return [];
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`Drive folder listing failed (${res.status}).`);
     }
-    pageToken = data.nextPageToken || '';
-  } while (pageToken);
+    return (data.files || []).map((f) => ({ id: f.id, name: f.name }));
+  };
 
-  return out;
-};
-
-/**
- * Subfolders of `parentId`.
- *
- * Only folders this app created are visible under the drive.file scope, so a
- * subfolder made by hand in the Drive web UI will not appear here — use the
- * app's own "new subfolder" action instead.
- */
-const listSubfolders = async (parentId) => {
-  if (!parentId) return [];
-  const params = new URLSearchParams({
-    q:
-      `'${parentId.replace(/'/g, "\\'")}' in parents ` +
-      "and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-    fields: 'files(id,name)',
-    orderBy: 'name',
-    pageSize: '200',
-    supportsAllDrives: 'true',
-  });
-  const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
-  if (res.status === 404) return [];
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`Drive folder listing failed (${res.status}).`);
-  }
-  return (data.files || []).map((f) => ({ id: f.id, name: f.name }));
-};
-
-/** Create a subfolder and return its id. */
-const createFolder = async (name, parentId) => {
-  const res = await fetch(`${FILES_API}?fields=id,name&supportsAllDrives=true`, {
-    ...NO_CACHE,
-    method: 'POST',
-    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name,
-      mimeType: 'application/vnd.google-apps.folder',
-      ...(parentId ? { parents: [parentId] } : {}),
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 404) {
-    throw new Error('The parent folder could not be found in the connected Drive account.');
-  }
-  if (!res.ok || !data.id) {
-    throw new Error(`Could not create the folder (${res.status}).`);
-  }
-  return { id: data.id, name: data.name };
-};
-
-/**
- * Walk the folder tree below `roots`, breadth-first, one Drive call per node.
- *
- * Bounded on both depth and node count: a deep or wide tree would otherwise
- * mean an unbounded number of API calls on every page load.
- */
-const buildFolderTree = async (roots, { maxDepth = 6, maxNodes = 250 } = {}) => {
-  let budget = maxNodes;
-
-  const walk = async (id, depth) => {
-    if (depth >= maxDepth || budget <= 0) return [];
-    let kids;
-    try {
-      kids = await listSubfolders(id);
-    } catch {
-      return []; // an unreachable branch should not fail the whole tree
+  /** Create a subfolder and return its id. */
+  const createFolder = async (name, parentId) => {
+    const res = await fetch(`${FILES_API}?fields=id,name&supportsAllDrives=true`, {
+      ...NO_CACHE,
+      method: 'POST',
+      headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        mimeType: 'application/vnd.google-apps.folder',
+        ...(parentId ? { parents: [parentId] } : {}),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 404) {
+      throw new Error('The parent folder could not be found in the connected Drive account.');
     }
-    const slice = kids.slice(0, Math.max(0, budget));
-    budget -= slice.length;
+    if (!res.ok || !data.id) {
+      throw new Error(`Could not create the folder (${res.status}).`);
+    }
+    return { id: data.id, name: data.name };
+  };
+
+  /**
+   * Walk the folder tree below `roots`, breadth-first, one Drive call per node.
+   *
+   * Bounded on both depth and node count: a deep or wide tree would otherwise
+   * mean an unbounded number of API calls on every page load.
+   */
+  const buildFolderTree = async (roots, { maxDepth = 6, maxNodes = 250 } = {}) => {
+    let budget = maxNodes;
+
+    const walk = async (id, depth) => {
+      if (depth >= maxDepth || budget <= 0) return [];
+      let kids;
+      try {
+        kids = await listSubfolders(id);
+      } catch {
+        return []; // an unreachable branch should not fail the whole tree
+      }
+      const slice = kids.slice(0, Math.max(0, budget));
+      budget -= slice.length;
+      return Promise.all(
+        slice.map(async (k) => ({
+          id: k.id,
+          name: k.name,
+          children: await walk(k.id, depth + 1),
+        }))
+      );
+    };
+
     return Promise.all(
-      slice.map(async (k) => ({
-        id: k.id,
-        name: k.name,
-        children: await walk(k.id, depth + 1),
+      roots.map(async (r) => ({
+        id: r.id,
+        name: r.name,
+        root: true,
+        children: await walk(r.id, 0),
       }))
     );
   };
 
-  return Promise.all(
-    roots.map(async (r) => ({
-      id: r.id,
-      name: r.name,
-      root: true,
-      children: await walk(r.id, 0),
-    }))
-  );
-};
-
-/** Metadata for one file, or null if it is gone. */
-const getFileMeta = async (fileId) => {
-  const res = await fetch(
-    `${FILES_API}/${encodeURIComponent(fileId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
-    { ...NO_CACHE, headers: await authHeaders() }
-  );
-  if (res.status === 404) return null;
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`Drive lookup failed (${res.status}). ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  return {
-    id: data.id,
-    name: data.name,
-    mime: data.mimeType || 'application/octet-stream',
-    size: Number(data.size) || 0,
-    uploader: data.appProperties?.uploader || '',
-    description: data.description || '',
-    createdAt: Date.parse(data.createdTime) || 0,
-    link: data.webViewLink || '',
-    shared: Boolean(data.shared),
-    hasThumb: Boolean(data.thumbnailLink),
-    thumbnailLink: data.thumbnailLink || '',
-  };
-};
-
-/**
- * Open a Drive file for reading. Returns the raw fetch Response so the caller
- * can hand `.body` straight to the client without buffering.
- */
-const downloadFile = async (fileId) => {
-  const res = await fetch(
-    `${FILES_API}/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
-    { ...NO_CACHE, headers: await authHeaders() }
-  );
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Drive download failed (${res.status}). ${detail.slice(0, 300)}`);
-  }
-  return res;
-};
-
-/**
- * Fetch a file's Drive-rendered thumbnail (images, PDFs, video).
- *
- * thumbnailLink is a short-lived pre-signed URL, so it normally needs no
- * Authorization header — but signed-URL behaviour varies, so fall back to an
- * authorised request rather than showing a broken preview.
- *
- * @param {number} size  requested longest edge in px
- */
-const getThumbnail = async (fileId, size = 400) => {
-  const meta = await getFileMeta(fileId);
-  if (!meta?.thumbnailLink) return null;
-
-  // Drive appends a size hint like "=s220"; swap it for the size we want.
-  const url = meta.thumbnailLink.replace(/=s\d+(-c)?$/, `=s${size}`);
-
-  let res = await fetch(url, NO_CACHE);
-  if (!res.ok) res = await fetch(url, { ...NO_CACHE, headers: await authHeaders() });
-  if (!res.ok) return null;
-  return res;
-};
-
-/**
- * Make a file readable by anyone holding its link, and return that link.
- *
- * This deliberately steps outside the app's password gate: the returned URL
- * works for anyone, signed in or not. Only called when a user explicitly asks
- * for a shareable Drive link.
- */
-const shareFile = async (fileId) => {
-  const meta = await getFileMeta(fileId);
-  if (!meta) return null;
-
-  if (!meta.shared) {
+  /** Metadata for one file, or null if it is gone. */
+  const getFileMeta = async (fileId) => {
     const res = await fetch(
-      `${FILES_API}/${encodeURIComponent(fileId)}/permissions?supportsAllDrives=true`,
-      {
-        ...NO_CACHE,
-        method: 'POST',
-        headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'reader', type: 'anyone' }),
-      }
+      `${FILES_API}/${encodeURIComponent(fileId)}?fields=${FILE_FIELDS}&supportsAllDrives=true`,
+      { ...NO_CACHE, headers: await authHeaders() }
+    );
+    if (res.status === 404) return null;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`Drive lookup failed (${res.status}). ${JSON.stringify(data).slice(0, 200)}`);
+    }
+    return {
+      id: data.id,
+      name: data.name,
+      mime: data.mimeType || 'application/octet-stream',
+      size: Number(data.size) || 0,
+      uploader: data.appProperties?.uploader || '',
+      description: data.description || '',
+      createdAt: Date.parse(data.createdTime) || 0,
+      link: data.webViewLink || '',
+      shared: Boolean(data.shared),
+      hasThumb: Boolean(data.thumbnailLink),
+      thumbnailLink: data.thumbnailLink || '',
+    };
+  };
+
+  /**
+   * Open a Drive file for reading. Returns the raw fetch Response so the caller
+   * can hand `.body` straight to the client without buffering.
+   */
+  const downloadFile = async (fileId) => {
+    const res = await fetch(
+      `${FILES_API}/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
+      { ...NO_CACHE, headers: await authHeaders() }
     );
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`Could not share the file (${res.status}). ${detail.slice(0, 300)}`);
+      throw new Error(`Drive download failed (${res.status}). ${detail.slice(0, 300)}`);
     }
-  }
+    return res;
+  };
 
-  // webViewLink is only populated once the file is readable, so re-read it.
-  const fresh = await getFileMeta(fileId);
-  const link = fresh?.link || `https://drive.google.com/file/d/${fileId}/view`;
-  return link;
-};
+  /**
+   * Fetch a file's Drive-rendered thumbnail (images, PDFs, video).
+   *
+   * thumbnailLink is a short-lived pre-signed URL, so it normally needs no
+   * Authorization header — but signed-URL behaviour varies, so fall back to an
+   * authorised request rather than showing a broken preview.
+   *
+   * @param {number} size  requested longest edge in px
+   */
+  const getThumbnail = async (fileId, size = 400) => {
+    const meta = await getFileMeta(fileId);
+    if (!meta?.thumbnailLink) return null;
 
-/** Set or clear a file's Drive description. Returns the stored value. */
-const updateDescription = async (fileId, description) => {
-  const res = await fetch(
-    `${FILES_API}/${encodeURIComponent(fileId)}?fields=description&supportsAllDrives=true`,
-    {
-      ...NO_CACHE,
-      method: 'PATCH',
-      headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
-      // An empty string clears it; Drive rejects null here.
-      body: JSON.stringify({ description: description || '' }),
+    // Drive appends a size hint like "=s220"; swap it for the size we want.
+    const url = meta.thumbnailLink.replace(/=s\d+(-c)?$/, `=s${size}`);
+
+    let res = await fetch(url, NO_CACHE);
+    if (!res.ok) res = await fetch(url, { ...NO_CACHE, headers: await authHeaders() });
+    if (!res.ok) return null;
+    return res;
+  };
+
+  /**
+   * Make a file readable by anyone holding its link, and return that link.
+   *
+   * This deliberately steps outside the app's password gate: the returned URL
+   * works for anyone, signed in or not. Only called when a user explicitly asks
+   * for a shareable Drive link.
+   */
+  const shareFile = async (fileId) => {
+    const meta = await getFileMeta(fileId);
+    if (!meta) return null;
+
+    if (!meta.shared) {
+      const res = await fetch(
+        `${FILES_API}/${encodeURIComponent(fileId)}/permissions?supportsAllDrives=true`,
+        {
+          ...NO_CACHE,
+          method: 'POST',
+          headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+        }
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`Could not share the file (${res.status}). ${detail.slice(0, 300)}`);
+      }
     }
-  );
-  if (res.status === 404) return null;
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`Could not save the description (${res.status}).`);
-  }
-  return data.description || '';
-};
 
-/** Delete a Drive file. A 404 counts as success — it's already gone. */
-const deleteFile = async (fileId) => {
-  const res = await fetch(
-    `${FILES_API}/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
-    { ...NO_CACHE, method: 'DELETE', headers: await authHeaders() }
-  );
-  if (!res.ok && res.status !== 404) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Drive delete failed (${res.status}). ${detail.slice(0, 300)}`);
-  }
-};
+    // webViewLink is only populated once the file is readable, so re-read it.
+    const fresh = await getFileMeta(fileId);
+    const link = fresh?.link || `https://drive.google.com/file/d/${fileId}/view`;
+    return link;
+  };
+
+  /** Set or clear a file's Drive description. Returns the stored value. */
+  const updateDescription = async (fileId, description) => {
+    const res = await fetch(
+      `${FILES_API}/${encodeURIComponent(fileId)}?fields=description&supportsAllDrives=true`,
+      {
+        ...NO_CACHE,
+        method: 'PATCH',
+        headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+        // An empty string clears it; Drive rejects null here.
+        body: JSON.stringify({ description: description || '' }),
+      }
+    );
+    if (res.status === 404) return null;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`Could not save the description (${res.status}).`);
+    }
+    return data.description || '';
+  };
+
+  /** Delete a Drive file. A 404 counts as success — it's already gone. */
+  const deleteFile = async (fileId) => {
+    const res = await fetch(
+      `${FILES_API}/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+      { ...NO_CACHE, method: 'DELETE', headers: await authHeaders() }
+    );
+    if (!res.ok && res.status !== 404) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Drive delete failed (${res.status}). ${detail.slice(0, 300)}`);
+    }
+  };
+
+  /**
+   * The folder that holds a connected user's uploads, in their Drive root.
+   *
+   * Reuses an existing one when this app made it before (e.g. the user
+   * reconnected after the database was wiped), so uploads never scatter across
+   * duplicate "Share Chat" folders.
+   */
+  const ensureAppFolder = async () => {
+    const params = new URLSearchParams({
+      q:
+        `name = '${APP_FOLDER_NAME}' and 'root' in parents ` +
+        "and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+      fields: 'files(id,name)',
+      orderBy: 'createdTime',
+      pageSize: '1',
+    });
+    const res = await fetch(`${FILES_API}?${params}`, { ...NO_CACHE, headers: await authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.files?.[0]) return { id: data.files[0].id, name: data.files[0].name };
+    return createFolder(APP_FOLDER_NAME, '');
+  };
+
+  return {
+    uploadFile,
+    listDriveFiles,
+    listSubfolders,
+    createFolder,
+    buildFolderTree,
+    getFileMeta,
+    shareFile,
+    updateDescription,
+    getThumbnail,
+    downloadFile,
+    deleteFile,
+    ensureAppFolder,
+  };
+}
+
+/** The shared Drive from GOOGLE_REFRESH_TOKEN. */
+const sharedClient = () => createClient(config().refreshToken, { shared: true });
 
 module.exports = {
   isConfigured,
-  uploadFile,
-  listDriveFiles,
-  listSubfolders,
-  createFolder,
-  buildFolderTree,
-  getFileMeta,
-  shareFile,
-  updateDescription,
-  getThumbnail,
-  downloadFile,
-  deleteFile,
+  isOAuthConfigured,
+  createClient,
+  sharedClient,
+  buildAuthUrl,
+  exchangeCode,
+  fetchUserInfo,
+  revokeToken,
 };

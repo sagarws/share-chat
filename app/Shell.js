@@ -8,6 +8,7 @@ import { AUTH_KEY, isEditMode } from './auth';
 const NAV = [
   { href: '/files', label: 'File Share', icon: '📁' },
   { href: '/chat', label: 'Chat', icon: '💬' },
+  { href: '/drive', label: 'Google Drive', icon: '☁️' },
 ];
 
 /**

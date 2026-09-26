@@ -4,7 +4,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Shell from '../Shell';
 import FolderTree from '../FolderTree';
-import { clearAuth, isAuthValid, getToken } from '../auth';
+import Link from 'next/link';
+import {
+  clearAuth,
+  isAuthValid,
+  apiHeaders,
+  authQuery,
+  clearDriveAccount,
+  getDriveAccount,
+} from '../auth';
 import { fileFromPaste } from '../clipboard';
 import { addCaption, isImage } from '../imageCaption';
 
@@ -82,6 +90,8 @@ export default function FilesPage() {
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolder, setNewFolder] = useState({ name: '', id: '' });
   const [view, setView] = useState('list');
+  // Whether this browser uploads to its own connected Drive or the shared one.
+  const [ownDrive, setOwnDrive] = useState(false);
 
   const inputRef = useRef(null);
   const xhrRef = useRef(null);
@@ -90,6 +100,20 @@ export default function FilesPage() {
     clearAuth();
     router.replace('/');
   }, [router]);
+
+  // The server answers 409 when this browser's Google Drive connection is gone
+  // (disconnected elsewhere, revoked at Google, or the server's database was
+  // reset). Forget it and send the user to reconnect, rather than quietly
+  // falling back to the shared Drive.
+  const driveGone = useCallback(
+    async (res) => {
+      const data = res ? await res.json().catch(() => ({})) : {};
+      clearDriveAccount();
+      const msg = data.error || 'Your Google Drive connection expired. Please reconnect.';
+      router.replace(`/drive?error=${encodeURIComponent(msg)}`);
+    },
+    [router]
+  );
 
   // Fetch one folder's files. Passing an explicit id avoids waiting for the
   // folder state to settle after a switch.
@@ -104,9 +128,10 @@ export default function FilesPage() {
       setLoading(true);
       try {
         const res = await fetch(`/api/files?folder=${encodeURIComponent(target)}`, {
-          headers: { Authorization: `Bearer ${getToken()}` },
+          headers: apiHeaders(),
         });
         if (res.status === 401) return logout();
+        if (res.status === 409) return driveGone(res);
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load files.');
         setFiles(data.files || []);
@@ -121,7 +146,7 @@ export default function FilesPage() {
         setLoading(false);
       }
     },
-    [folderId, logout]
+    [folderId, logout, driveGone]
   );
 
   // The tree is built server-side by walking Drive; this only fetches it.
@@ -134,9 +159,10 @@ export default function FilesPage() {
     async (refresh, expectId, attempt = 0) => {
       try {
         const res = await fetch(`/api/folders/tree${refresh ? '?refresh=1' : ''}`, {
-          headers: { Authorization: `Bearer ${getToken()}` },
+          headers: apiHeaders(),
         });
         if (res.status === 401) return logout();
+        if (res.status === 409) return driveGone(res);
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) return;
 
@@ -156,15 +182,16 @@ export default function FilesPage() {
         // a missing tree only costs the panel; the file list still works
       }
     },
-    [logout]
+    [logout, driveGone]
   );
 
   const load = useCallback(async () => {
     try {
       const res = await fetch('/api/folders', {
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: apiHeaders(),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load folders.');
       setFolders(data.folders || []);
@@ -177,7 +204,7 @@ export default function FilesPage() {
     }
     // loadFiles/loadTree are recreated per render but only read what we pass.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logout]);
+  }, [logout, driveGone]);
 
   // Gate the page on the same token the chat uses, then fetch the list.
   useEffect(() => {
@@ -196,6 +223,7 @@ export default function FilesPage() {
       return;
     }
     setReady(true);
+    setOwnDrive(Boolean(getDriveAccount()));
     try {
       const saved = window.localStorage.getItem('files-view');
       if (saved === 'grid' || saved === 'list') setView(saved);
@@ -272,7 +300,7 @@ export default function FilesPage() {
     const xhr = new XMLHttpRequest();
     xhrRef.current = xhr;
     xhr.open('POST', '/api/files');
-    xhr.setRequestHeader('Authorization', `Bearer ${getToken()}`);
+    for (const [k, v] of Object.entries(apiHeaders())) xhr.setRequestHeader(k, v);
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
     xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
     if (folderId) xhr.setRequestHeader('X-Folder', encodeURIComponent(folderId));
@@ -297,6 +325,7 @@ export default function FilesPage() {
         /* fall through to the generic message below */
       }
       if (xhr.status === 401) return logout();
+      if (xhr.status === 409) return driveGone();
       if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
         // Show it straight away, then refetch: the row returned here has no
         // thumbnail or share state, and Drive needs a moment to render a
@@ -334,10 +363,7 @@ export default function FilesPage() {
     try {
       await fetch('/api/folders', {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ selected: id }),
       });
     } catch {
@@ -353,13 +379,11 @@ export default function FilesPage() {
     try {
       const res = await fetch('/api/folders', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ name, id }),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Could not add folder.');
       setFolders(data.folders || []);
@@ -379,9 +403,10 @@ export default function FilesPage() {
     try {
       const res = await fetch(`/api/folders/${encodeURIComponent(folder.id)}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: apiHeaders(),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Could not remove folder.');
       setFolders(data.folders || []);
@@ -401,13 +426,11 @@ export default function FilesPage() {
     try {
       const res = await fetch('/api/folders/subfolder', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ name, parentId: parent.id }),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Could not create the folder.');
       setError('');
@@ -442,10 +465,10 @@ export default function FilesPage() {
   // `inline` makes the server send Content-Disposition: inline, so the browser
   // renders the file instead of downloading it.
   const viewHref = (id) =>
-    `/api/files/${id}?inline=1&token=${encodeURIComponent(getToken())}`;
+    `/api/files/${id}?inline=1&${authQuery()}`;
 
   const thumbHref = (id, size) =>
-    `/api/files/${id}/thumb?s=${size}&token=${encodeURIComponent(getToken())}`;
+    `/api/files/${id}/thumb?s=${size}&${authQuery()}`;
 
   // Drive renders thumbnails asynchronously, so a just-uploaded image has none
   // for a while. Rather than showing a placeholder icon, fall back to the image
@@ -539,13 +562,11 @@ export default function FilesPage() {
     try {
       const res = await fetch(`/api/files/${editing.id}`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`,
-        },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ description: editText }),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save.');
       setFiles((prev) =>
@@ -567,9 +588,10 @@ export default function FilesPage() {
     try {
       const res = await fetch(`/api/files/${row.id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: apiHeaders(),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'Delete failed.');
       setFiles((prev) => prev.filter((f) => f.id !== row.id));
@@ -589,7 +611,7 @@ export default function FilesPage() {
 
   // Downloads are plain navigations, so the token rides in the query string.
   const downloadHref = (id) =>
-    `/api/files/${id}?token=${encodeURIComponent(getToken())}`;
+    `/api/files/${id}?${authQuery()}`;
 
   // Copy a Google Drive link. This asks the server to grant "anyone with the
   // link can view" on the Drive file, so the resulting URL works for people who
@@ -603,9 +625,10 @@ export default function FilesPage() {
     try {
       const res = await fetch(`/api/files/${row.id}/share`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}` },
+        headers: apiHeaders(),
       });
       if (res.status === 401) return logout();
+      if (res.status === 409) return driveGone(res);
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok || !data.link) {
         throw new Error(data.error || 'Could not create a share link.');
@@ -665,6 +688,13 @@ export default function FilesPage() {
       title="File Share"
       actions={
         <>
+          <Link
+            href="/drive"
+            className={`drive-chip${ownDrive ? ' own' : ''}`}
+            title={ownDrive ? 'Uploading to your Google Drive' : 'Uploading to the shared Drive'}
+          >
+            {ownDrive ? 'My Drive' : 'Shared Drive'}
+          </Link>
           <span className="muted">
             {currentFolderName ? `${currentFolderName} · ` : ''}
             {files.length} file{files.length === 1 ? '' : 's'}
@@ -763,9 +793,8 @@ export default function FilesPage() {
         >
           {!configured && (
             <div className="files-notice">
-              Google Drive isn’t connected yet. Run{' '}
-              <code>node scripts/get-google-refresh-token.js</code> and restart the
-              server.
+              Google Drive isn’t connected yet.{' '}
+              <Link href="/drive">Connect your Google Drive</Link> to start uploading.
             </div>
           )}
 

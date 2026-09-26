@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { verifyToken, getSelectedFolder } from '../../../db';
-import { isConfigured, uploadFile, listDriveFiles } from '../../../drive';
+import { getSelectedFolder } from '../../../db';
+import { resolveDrive, driveError } from '../../serverDrive';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,21 +17,14 @@ const formatSize = (bytes) => {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 };
 
-const readToken = (req) => {
-  const header = req.headers.get('authorization') || '';
-  const [scheme, value] = header.split(' ');
-  return scheme?.toLowerCase() === 'bearer' ? value : '';
-};
-
 // Google Drive is the single source of truth for the listing. Nothing about a
 // shared file lives in the local database, so a wiped disk (Render's free plan
 // clears it on every redeploy) costs nothing — the list rebuilds itself from
 // Drive on the next request.
 export async function GET(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
-  }
-  if (!isConfigured()) {
+  const ctx = resolveDrive(req);
+  if (ctx.error) return ctx.error;
+  if (!ctx.configured) {
     return NextResponse.json({
       ok: true,
       configured: false,
@@ -43,20 +36,17 @@ export async function GET(req) {
   try {
     // ?folder=<id> scopes the listing; without it, the remembered default.
     const asked = new URL(req.url).searchParams.get('folder');
-    const folderId = asked || getSelectedFolder();
+    const folderId = asked || getSelectedFolder(ctx.accountId);
 
     return NextResponse.json({
       ok: true,
       configured: true,
       maxBytes: MAX_UPLOAD_BYTES,
       folderId,
-      files: folderId ? await listDriveFiles(folderId) : [],
+      files: folderId ? await ctx.drive.listDriveFiles(folderId) : [],
     });
   } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || 'Could not read files.' },
-      { status: 502 }
-    );
+    return driveError(err, 'Could not read files.');
   }
 }
 
@@ -64,10 +54,9 @@ export async function GET(req) {
 // metadata in headers, so the bytes stream straight through to Drive instead
 // of being buffered in memory.
 export async function POST(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
-  }
-  if (!isConfigured()) {
+  const ctx = resolveDrive(req);
+  if (ctx.error) return ctx.error;
+  if (!ctx.configured) {
     return NextResponse.json(
       {
         ok: false,
@@ -98,7 +87,7 @@ export async function POST(req) {
   // remembered default. Any folder in the tree is valid, including a
   // subfolder; an id Drive cannot reach fails with a clear error below.
   const asked = decode(req.headers.get('x-folder')).trim();
-  const folderId = asked || getSelectedFolder();
+  const folderId = asked || getSelectedFolder(ctx.accountId);
   if (!folderId) {
     return NextResponse.json(
       { ok: false, error: 'No Drive folder configured. Add one first.' },
@@ -122,7 +111,7 @@ export async function POST(req) {
   }
 
   try {
-    const driveId = await uploadFile({
+    const driveId = await ctx.drive.uploadFile({
       name,
       mime,
       size,
@@ -136,9 +125,6 @@ export async function POST(req) {
       file: { id: driveId, name, mime, size, uploader, description, createdAt: Date.now() },
     });
   } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || 'Upload failed.' },
-      { status: 502 }
-    );
+    return driveError(err, 'Upload failed.');
   }
 }

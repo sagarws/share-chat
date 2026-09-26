@@ -36,3 +36,45 @@ export const getToken = () => readAuth()?.token || '';
 
 export const isEditMode = () =>
   typeof window !== 'undefined' && window.localStorage.getItem(EDIT_KEY) === 'true';
+
+// --- Connected Google Drive -------------------------------------------------
+//
+// A browser that connected its own Google Drive on the /drive page holds an
+// account key here (written by /oauth2callback). Every Drive request sends it
+// so the server uses that Drive instead of the shared one.
+
+export const DRIVE_KEY = 'drive-account';
+
+export const getDriveAccount = () => {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(DRIVE_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+
+export const clearDriveAccount = () => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(DRIVE_KEY);
+  } catch {
+    // storage disabled — nothing stored to clear
+  }
+};
+
+/** Headers for an authenticated API call: session token plus Drive account. */
+export const apiHeaders = (extra = {}) => {
+  const headers = { Authorization: `Bearer ${getToken()}`, ...extra };
+  const account = getDriveAccount();
+  if (account) headers['X-Drive-Account'] = account;
+  return headers;
+};
+
+/** The same, as a query string, for <a>/<img> URLs that cannot set headers. */
+export const authQuery = () => {
+  const params = new URLSearchParams({ token: getToken() });
+  const account = getDriveAccount();
+  if (account) params.set('account', account);
+  return params.toString();
+};

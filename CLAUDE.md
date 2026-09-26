@@ -63,6 +63,21 @@ curl -s -X POST localhost:3100/api/login -H 'Content-Type: application/json' -d 
   `http://localhost:3000/oauth2callback`, so port 3000 *must* be free when
   running `scripts/get-google-refresh-token.js`.
 
+## Per-user Google Drive (/drive page)
+
+- Users can connect their own Drive: `/api/google/connect` → Google consent →
+  `/oauth2callback` stores their refresh token in `google_accounts` and gives
+  the browser a signed account key (localStorage `drive-account`). Requests
+  send it as `X-Drive-Account` (or `?account=` on download/thumb URLs);
+  `app/serverDrive.js` then picks that user's Drive. No key → the shared Drive
+  from `GOOGLE_REFRESH_TOKEN`, as before.
+- Same OAuth client (`GOOGLE_CLIENT_ID`/`SECRET`). Every origin needs
+  `<origin>/oauth2callback` in the client's **Authorized redirect URIs**.
+  `http://localhost:3000/oauth2callback` is already registered; the Render URL
+  must be added. `APP_URL` pins the origin if the proxy headers are wrong.
+- Connected accounts live in SQLite, so a Render redeploy wipes them. Users
+  then get a 409 `reconnect` and are sent back to `/drive`.
+
 ## Deployment (Render, free plan)
 
 - `data/app.db` is **wiped on every redeploy** — there is no persistent disk.

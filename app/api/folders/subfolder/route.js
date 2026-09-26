@@ -1,24 +1,16 @@
 import { NextResponse } from 'next/server';
-import { verifyToken } from '../../../../db';
-import { isConfigured, createFolder } from '../../../../drive';
+import { resolveDrive, driveError } from '../../../serverDrive';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const readToken = (req) => {
-  const header = req.headers.get('authorization') || '';
-  const [scheme, value] = header.split(' ');
-  return scheme?.toLowerCase() === 'bearer' ? value : '';
-};
 
 // Creates a real folder in Drive under `parentId`. Folders made this way are
 // app-created, so they are visible to the drive.file scope and appear in the
 // tree — unlike a folder made by hand in the Drive web UI.
 export async function POST(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
-  }
-  if (!isConfigured()) {
+  const ctx = resolveDrive(req);
+  if (ctx.error) return ctx.error;
+  if (!ctx.configured) {
     return NextResponse.json({ ok: false, error: 'Google Drive is not configured.' }, { status: 503 });
   }
 
@@ -39,12 +31,9 @@ export async function POST(req) {
   }
 
   try {
-    const folder = await createFolder(name, parentId);
+    const folder = await ctx.drive.createFolder(name, parentId);
     return NextResponse.json({ ok: true, folder });
   } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || 'Could not create the folder.' },
-      { status: 502 }
-    );
+    return driveError(err, 'Could not create the folder.');
   }
 }

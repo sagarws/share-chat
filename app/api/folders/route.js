@@ -1,29 +1,17 @@
 import { NextResponse } from 'next/server';
-import {
-  verifyToken,
-  listFolders,
-  addFolder,
-  getSelectedFolder,
-  setSelectedFolder,
-} from '../../../db';
+import { listFolders, addFolder, getSelectedFolder, setSelectedFolder } from '../../../db';
+import { resolveDrive } from '../../serverDrive';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const readToken = (req) => {
-  const header = req.headers.get('authorization') || '';
-  const [scheme, value] = header.split(' ');
-  return scheme?.toLowerCase() === 'bearer' ? value : '';
-};
-
 export async function GET(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
-  }
+  const ctx = resolveDrive(req);
+  if (ctx.error) return ctx.error;
   return NextResponse.json({
     ok: true,
-    folders: listFolders(),
-    selected: getSelectedFolder(),
+    folders: listFolders(ctx.accountId),
+    selected: getSelectedFolder(ctx.accountId),
   });
 }
 
@@ -31,9 +19,8 @@ export async function GET(req) {
 // drive.file scope Drive will not confirm a folder this app did not create,
 // so a wrong id only shows up as a clear error on the first listing or upload.
 export async function POST(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
-  }
+  const ctx = resolveDrive(req);
+  if (ctx.error) return ctx.error;
 
   let body;
   try {
@@ -60,22 +47,21 @@ export async function POST(req) {
     );
   }
 
-  addFolder(folderId, name);
+  addFolder(folderId, name, ctx.accountId);
   // First folder registered becomes the default destination.
-  if (!getSelectedFolder()) setSelectedFolder(folderId);
+  if (!getSelectedFolder(ctx.accountId)) setSelectedFolder(folderId, ctx.accountId);
 
   return NextResponse.json({
     ok: true,
-    folders: listFolders(),
-    selected: getSelectedFolder(),
+    folders: listFolders(ctx.accountId),
+    selected: getSelectedFolder(ctx.accountId),
   });
 }
 
 // Change the default destination folder, remembered for next time.
 export async function PUT(req) {
-  if (!verifyToken(readToken(req))) {
-    return NextResponse.json({ ok: false, error: 'Unauthorized.' }, { status: 401 });
-  }
+  const ctx = resolveDrive(req);
+  if (ctx.error) return ctx.error;
   let body;
   try {
     body = await req.json();
@@ -83,8 +69,8 @@ export async function PUT(req) {
     return NextResponse.json({ ok: false, error: 'Invalid JSON.' }, { status: 400 });
   }
   const id = typeof body?.selected === 'string' ? body.selected.trim() : '';
-  if (!setSelectedFolder(id)) {
+  if (!setSelectedFolder(id, ctx.accountId)) {
     return NextResponse.json({ ok: false, error: 'Unknown folder.' }, { status: 404 });
   }
-  return NextResponse.json({ ok: true, selected: getSelectedFolder() });
+  return NextResponse.json({ ok: true, selected: getSelectedFolder(ctx.accountId) });
 }
