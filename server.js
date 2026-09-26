@@ -1,19 +1,51 @@
 const { createServer } = require('http');
+const net = require('net');
+const os = require('os');
+const { loadEnvConfig } = require('@next/env');
 const next = require('next');
 const { Server } = require('socket.io');
 const { verifyToken } = require('./db');
 
 const dev = process.env.NODE_ENV !== 'production';
+// Load .env now so PORT is read from it; Next would otherwise load it only
+// after the port has already been chosen.
+loadEnvConfig(process.cwd(), dev);
+
 const hostname = '0.0.0.0';
-const port = parseInt(process.env.PORT, 10) || 3000;
+const preferredPort = parseInt(process.env.PORT, 10) || 3000;
+const MAX_PORT_TRIES = 20;
 const MAX_FILE_BYTES = 1000000 * 1024 * 1024;
 const MAX_CHUNK_BYTES = 51200000 * 1024;
 const MAX_CONCURRENT_TRANSFERS = 4000;
 
-const app = next({ dev, hostname, port });
-const handle = app.getRequestHandler();
+// Resolve to `port` if it can be bound, otherwise try the ports after it.
+function findFreePort(port, triesLeft = MAX_PORT_TRIES) {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', (err) => {
+      if (err.code === 'EADDRINUSE' && triesLeft > 1) {
+        resolve(findFreePort(port + 1, triesLeft - 1));
+      } else {
+        reject(err);
+      }
+    });
+    probe.once('listening', () => probe.close(() => resolve(port)));
+    probe.listen(port, hostname);
+  });
+}
 
-app.prepare().then(() => {
+findFreePort(preferredPort).then((port) => {
+  if (port !== preferredPort) {
+    console.log(`> Port ${preferredPort} is in use, using ${port} instead`);
+  }
+
+  const app = next({ dev, hostname, port });
+  const handle = app.getRequestHandler();
+
+  return app.prepare().then(() => startServer(handle, port));
+});
+
+function startServer(handle, port) {
   const httpServer = createServer((req, res) => handle(req, res));
 
   const io = new Server(httpServer, {
@@ -180,6 +212,18 @@ app.prepare().then(() => {
   });
 
   httpServer.listen(port, hostname, () => {
-    console.log(`> Ready on http://${hostname}:${port}`);
+    console.log('> Ready');
+    console.log(`  Local:   http://localhost:${port}`);
+    for (const ip of lanAddresses()) {
+      console.log(`  Network: http://${ip}:${port}`);
+    }
   });
-});
+}
+
+// IPv4 addresses other devices on the same network can reach this machine at.
+function lanAddresses() {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((iface) => iface && iface.family === 'IPv4' && !iface.internal)
+    .map((iface) => iface.address);
+}
