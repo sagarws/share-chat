@@ -12,7 +12,12 @@ const PERSIST_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 
 // Resolve the DB path. Default lives under ./data so it's easy to gitignore.
 // On Render, mount a Persistent Disk at /var/data and set DB_PATH=/var/data/app.db.
-const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'app.db');
+// Vercel's filesystem is read-only except /tmp, so default there when VERCEL is set.
+const DB_PATH =
+  process.env.DB_PATH ||
+  (process.env.VERCEL
+    ? path.join('/tmp', 'app.db')
+    : path.join(process.cwd(), 'data', 'app.db'));
 
 // The database is opened lazily, on first use.
 //
