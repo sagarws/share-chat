@@ -34,6 +34,7 @@ let getFolderStmt = null;
 let addFolderStmt = null;
 let deleteFolderStmt = null;
 let acct = null; // prepared statements for connected Google accounts
+let cleanup = null; // prepared statements for installer_cleanups
 
 const getSetting = (key) => {
   init();
@@ -87,7 +88,27 @@ function init() {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (account_id, id)
     );
+    -- One row per TrackVid CMS launch that deleted old installers from the
+    -- operator's Downloads folder. Written by POST /api/installer-cleanup.
+    CREATE TABLE IF NOT EXISTS installer_cleanups (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_name  TEXT NOT NULL,
+      deleted_count INTEGER NOT NULL,
+      created_at    INTEGER NOT NULL
+    );
   `);
+
+  cleanup = {
+    insert: handle.prepare(
+      'INSERT INTO installer_cleanups (company_name, deleted_count, created_at) VALUES (?, ?, ?)'
+    ),
+    list: handle.prepare('SELECT * FROM installer_cleanups ORDER BY created_at DESC, id DESC'),
+    byCompany: handle.prepare(
+      'SELECT company_name, COUNT(*) AS runs, SUM(deleted_count) AS total_deleted, ' +
+        'MAX(created_at) AS last_at FROM installer_cleanups ' +
+        'GROUP BY company_name ORDER BY last_at DESC'
+    ),
+  };
 
   acct = {
     get: handle.prepare('SELECT * FROM google_accounts WHERE id = ?'),
@@ -409,6 +430,38 @@ const removeAccount = (id) => {
   return acct.remove.run(id).changes > 0;
 };
 
+// --- TrackVid CMS installer cleanups ----------------------------------------
+
+const addInstallerCleanup = (companyName, deletedCount) => {
+  init();
+  const createdAt = Date.now();
+  const { lastInsertRowid } = cleanup.insert.run(companyName, deletedCount, createdAt);
+  return {
+    id: Number(lastInsertRowid),
+    companyName,
+    deletedCount,
+    deletedAt: new Date(createdAt).toISOString(),
+  };
+};
+
+const listInstallerCleanups = () => {
+  init();
+  return {
+    records: cleanup.list.all().map((row) => ({
+      id: row.id,
+      companyName: row.company_name,
+      deletedCount: row.deleted_count,
+      deletedAt: new Date(row.created_at).toISOString(),
+    })),
+    companies: cleanup.byCompany.all().map((row) => ({
+      companyName: row.company_name,
+      runs: row.runs,
+      totalDeleted: row.total_deleted,
+      lastDeletedAt: new Date(row.last_at).toISOString(),
+    })),
+  };
+};
+
 module.exports = {
   SESSION_MS,
   PERSIST_MS,
@@ -429,4 +482,6 @@ module.exports = {
   getAccount,
   saveAccount,
   removeAccount,
+  addInstallerCleanup,
+  listInstallerCleanups,
 };

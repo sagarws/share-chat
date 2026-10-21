@@ -4,7 +4,7 @@ const os = require('os');
 const { loadEnvConfig } = require('@next/env');
 const next = require('next');
 const { Server } = require('socket.io');
-const { verifyToken } = require('./db');
+const { verifyToken, addInstallerCleanup, listInstallerCleanups } = require('./db');
 
 const dev = process.env.NODE_ENV !== 'production';
 // Load .env now so PORT is read from it; Next would otherwise load it only
@@ -45,8 +45,85 @@ findFreePort(preferredPort).then((port) => {
   return app.prepare().then(() => startServer(handle, port));
 });
 
+// --- TrackVid CMS installer cleanup log ---------------------------------------
+//
+// POST /api/installer-cleanup  — the CMS desktop app reports how many old
+//   installers it deleted from Downloads on launch.
+// GET  /api/installer-cleanup  — every record, plus per-company totals.
+//
+// PUBLIC, by the owner's choice: no key on either route. Anyone with the URL
+// can add a row or read the whole list, company names included.
+
+const CLEANUP_PATH = '/api/installer-cleanup';
+const MAX_BODY_BYTES = 10 * 1024;
+
+const sendJson = (res, status, body) => {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+};
+
+const readJsonBody = (req) =>
+  new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('Body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      } catch {
+        reject(new Error('Body is not valid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+
+async function handleInstallerCleanup(req, res) {
+  if (req.method === 'GET') {
+    return sendJson(res, 200, { ok: true, ...listInstallerCleanups() });
+  }
+
+  if (req.method === 'POST') {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, 400, { ok: false, error: error.message });
+    }
+
+    const companyName =
+      typeof body.companyName === 'string' ? body.companyName.trim().slice(0, 200) : '';
+    const deletedCount = Number(body.deletedCount);
+
+    if (!companyName) return sendJson(res, 400, { ok: false, error: 'companyName is required' });
+    if (!Number.isInteger(deletedCount) || deletedCount <= 0 || deletedCount > 10000) {
+      return sendJson(res, 400, { ok: false, error: 'deletedCount must be a whole number above 0' });
+    }
+
+    return sendJson(res, 201, { ok: true, record: addInstallerCleanup(companyName, deletedCount) });
+  }
+
+  res.setHeader('Allow', 'GET, POST');
+  return sendJson(res, 405, { ok: false, error: 'Method not allowed' });
+}
+
 function startServer(handle, port) {
-  const httpServer = createServer((req, res) => handle(req, res));
+  const httpServer = createServer((req, res) => {
+    if (req.url.split('?')[0] === CLEANUP_PATH) {
+      return handleInstallerCleanup(req, res).catch((error) => {
+        console.error('installer-cleanup failed', error);
+        if (!res.headersSent) sendJson(res, 500, { ok: false, error: 'Server error' });
+      });
+    }
+    return handle(req, res);
+  });
 
   const io = new Server(httpServer, {
     cors: { origin: '*' },
